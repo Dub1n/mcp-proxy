@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/TBXark/optional-go v0.0.1
 	github.com/go-sphere/confstore v0.0.4
+	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.39.1
 	golang.org/x/sync v0.17.0
 )
@@ -12,7 +13,6 @@ require (
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/mailru/easyjson v0.9.0 // indirect
 	github.com/spf13/cast v1.9.2 // indirect

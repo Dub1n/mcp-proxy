@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"errors"
+	"log"
 	nethttp "net/http"
 	"strings"
 	"time"
@@ -68,6 +69,16 @@ type OptionsV2 struct {
 	ToolFilter     *ToolFilterConfig    `json:"toolFilter,omitempty"`
 }
 
+type ManifestConfig struct {
+	Name          string        `json:"name"`
+	Version       string        `json:"version"`
+	Description   string        `json:"description,omitempty"`
+	PublicBaseURL string        `json:"publicBaseURL,omitempty"`
+	LocalBaseURL  string        `json:"localBaseURL,omitempty"`
+	SSEEndpoint   string        `json:"sseEndpoint"`
+	Resources     []interface{} `json:"resources,omitempty"`
+}
+
 type MCPProxyConfigV2 struct {
 	BaseURL string        `json:"baseURL"`
 	Addr    string        `json:"addr"`
@@ -125,6 +136,7 @@ func parseMCPClientConfigV2(conf *MCPClientConfigV2) (any, error) {
 
 type Config struct {
 	McpProxy   *MCPProxyConfigV2             `json:"mcpProxy"`
+	Manifest   *ManifestConfig               `json:"manifest"`
 	McpServers map[string]*MCPClientConfigV2 `json:"mcpServers"`
 }
 
@@ -133,6 +145,7 @@ type FullConfig struct {
 	DeprecatedClientsV1 map[string]*MCPClientConfigV1 `json:"clients"`
 
 	McpProxy   *MCPProxyConfigV2             `json:"mcpProxy"`
+	Manifest   *ManifestConfig               `json:"manifest"`
 	McpServers map[string]*MCPClientConfigV2 `json:"mcpServers"`
 }
 
@@ -216,8 +229,13 @@ func load(path string, insecure, expandEnv bool, httpHeaders string, httpTimeout
 		conf.McpProxy.Type = MCPServerTypeSSE // default to SSE
 	}
 
+	if conf.Manifest == nil {
+		log.Printf("<manifest> no manifest configuration found in config file")
+	}
+
 	return &Config{
 		McpProxy:   conf.McpProxy,
+		Manifest:   conf.Manifest,
 		McpServers: conf.McpServers,
 	}, nil
 }

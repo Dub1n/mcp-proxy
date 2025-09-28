@@ -83,7 +83,7 @@ func newMCPClient(name string, conf *MCPClientConfigV2) (*Client, error) {
 	return nil, errors.New("invalid client type")
 }
 
-func (c *Client) addToMCPServer(ctx context.Context, clientInfo mcp.Implementation, mcpServer *server.MCPServer) error {
+func (c *Client) addToMCPServer(ctx context.Context, clientInfo mcp.Implementation, srv *Server) error {
 	if c.needManualStart {
 		err := c.client.Start(ctx)
 		if err != nil {
@@ -104,13 +104,13 @@ func (c *Client) addToMCPServer(ctx context.Context, clientInfo mcp.Implementati
 	}
 	log.Printf("<%s> Successfully initialized MCP client", c.name)
 
-	err = c.addToolsToServer(ctx, mcpServer)
+	err = c.addToolsToServer(ctx, srv)
 	if err != nil {
 		return err
 	}
-	_ = c.addPromptsToServer(ctx, mcpServer)
-	_ = c.addResourcesToServer(ctx, mcpServer)
-	_ = c.addResourceTemplatesToServer(ctx, mcpServer)
+	_ = c.addPromptsToServer(ctx, srv)
+	_ = c.addResourcesToServer(ctx, srv)
+	_ = c.addResourceTemplatesToServer(ctx, srv)
 
 	if c.needPing {
 		go c.startPingTask(ctx)
@@ -144,7 +144,7 @@ func (c *Client) startPingTask(ctx context.Context) {
 	}
 }
 
-func (c *Client) addToolsToServer(ctx context.Context, mcpServer *server.MCPServer) error {
+func (c *Client) addToolsToServer(ctx context.Context, srv *Server) error {
 	toolsRequest := mcp.ListToolsRequest{}
 	filterFunc := func(toolName string) bool {
 		return true
@@ -190,7 +190,8 @@ func (c *Client) addToolsToServer(ctx context.Context, mcpServer *server.MCPServ
 		for _, tool := range tools.Tools {
 			if filterFunc(tool.Name) {
 				log.Printf("<%s> Adding tool %s", c.name, tool.Name)
-				mcpServer.AddTool(tool, c.client.CallTool)
+				srv.mcpServer.AddTool(tool, c.client.CallTool)
+				srv.addTool(tool)
 			}
 		}
 		if tools.NextCursor == "" {
@@ -202,7 +203,7 @@ func (c *Client) addToolsToServer(ctx context.Context, mcpServer *server.MCPServ
 	return nil
 }
 
-func (c *Client) addPromptsToServer(ctx context.Context, mcpServer *server.MCPServer) error {
+func (c *Client) addPromptsToServer(ctx context.Context, srv *Server) error {
 	promptsRequest := mcp.ListPromptsRequest{}
 	for {
 		prompts, err := c.client.ListPrompts(ctx, promptsRequest)
@@ -215,7 +216,8 @@ func (c *Client) addPromptsToServer(ctx context.Context, mcpServer *server.MCPSe
 		log.Printf("<%s> Successfully listed %d prompts", c.name, len(prompts.Prompts))
 		for _, prompt := range prompts.Prompts {
 			log.Printf("<%s> Adding prompt %s", c.name, prompt.Name)
-			mcpServer.AddPrompt(prompt, c.client.GetPrompt)
+			srv.mcpServer.AddPrompt(prompt, c.client.GetPrompt)
+			srv.addPrompt(prompt)
 		}
 		if prompts.NextCursor == "" {
 			break
@@ -225,7 +227,7 @@ func (c *Client) addPromptsToServer(ctx context.Context, mcpServer *server.MCPSe
 	return nil
 }
 
-func (c *Client) addResourcesToServer(ctx context.Context, mcpServer *server.MCPServer) error {
+func (c *Client) addResourcesToServer(ctx context.Context, srv *Server) error {
 	resourcesRequest := mcp.ListResourcesRequest{}
 	for {
 		resources, err := c.client.ListResources(ctx, resourcesRequest)
@@ -238,13 +240,14 @@ func (c *Client) addResourcesToServer(ctx context.Context, mcpServer *server.MCP
 		log.Printf("<%s> Successfully listed %d resources", c.name, len(resources.Resources))
 		for _, resource := range resources.Resources {
 			log.Printf("<%s> Adding resource %s", c.name, resource.Name)
-			mcpServer.AddResource(resource, func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			srv.mcpServer.AddResource(resource, func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
 				readResource, e := c.client.ReadResource(ctx, request)
 				if e != nil {
 					return nil, e
 				}
 				return readResource.Contents, nil
 			})
+			srv.addResource(resource)
 		}
 		if resources.NextCursor == "" {
 			break
@@ -255,7 +258,7 @@ func (c *Client) addResourcesToServer(ctx context.Context, mcpServer *server.MCP
 	return nil
 }
 
-func (c *Client) addResourceTemplatesToServer(ctx context.Context, mcpServer *server.MCPServer) error {
+func (c *Client) addResourceTemplatesToServer(ctx context.Context, srv *Server) error {
 	resourceTemplatesRequest := mcp.ListResourceTemplatesRequest{}
 	for {
 		resourceTemplates, err := c.client.ListResourceTemplates(ctx, resourceTemplatesRequest)
@@ -268,13 +271,14 @@ func (c *Client) addResourceTemplatesToServer(ctx context.Context, mcpServer *se
 		log.Printf("<%s> Successfully listed %d resource templates", c.name, len(resourceTemplates.ResourceTemplates))
 		for _, resourceTemplate := range resourceTemplates.ResourceTemplates {
 			log.Printf("<%s> Adding resource template %s", c.name, resourceTemplate.Name)
-			mcpServer.AddResourceTemplate(resourceTemplate, func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+			srv.mcpServer.AddResourceTemplate(resourceTemplate, func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
 				readResource, e := c.client.ReadResource(ctx, request)
 				if e != nil {
 					return nil, e
 				}
 				return readResource.Contents, nil
 			})
+			srv.addResourceTemplate(resourceTemplate)
 		}
 		if resourceTemplates.NextCursor == "" {
 			break
@@ -292,9 +296,15 @@ func (c *Client) Close() error {
 }
 
 type Server struct {
-	tokens    []string
-	mcpServer *server.MCPServer
-	handler   http.Handler
+	name              string
+	transport         MCPServerType
+	tokens            []string
+	mcpServer         *server.MCPServer
+	handler           http.Handler
+	tools             []mcp.Tool
+	prompts           []mcp.Prompt
+	resources         []mcp.Resource
+	resourceTemplates []mcp.ResourceTemplate
 }
 
 func newMCPServer(name string, serverConfig *MCPProxyConfigV2, clientConfig *MCPClientConfigV2) (*Server, error) {
@@ -330,6 +340,8 @@ func newMCPServer(name string, serverConfig *MCPProxyConfigV2, clientConfig *MCP
 		return nil, fmt.Errorf("unknown server type: %s", serverConfig.Type)
 	}
 	srv := &Server{
+		name:      name,
+		transport: serverConfig.Type,
 		mcpServer: mcpServer,
 		handler:   handler,
 	}
@@ -339,4 +351,20 @@ func newMCPServer(name string, serverConfig *MCPProxyConfigV2, clientConfig *MCP
 	}
 
 	return srv, nil
+}
+
+func (s *Server) addTool(tool mcp.Tool) {
+	s.tools = append(s.tools, tool)
+}
+
+func (s *Server) addPrompt(prompt mcp.Prompt) {
+	s.prompts = append(s.prompts, prompt)
+}
+
+func (s *Server) addResource(resource mcp.Resource) {
+	s.resources = append(s.resources, resource)
+}
+
+func (s *Server) addResourceTemplate(resourceTemplate mcp.ResourceTemplate) {
+	s.resourceTemplates = append(s.resourceTemplates, resourceTemplate)
 }
