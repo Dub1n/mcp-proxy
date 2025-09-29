@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -51,7 +52,7 @@ func TestBuildInitializeResultIncludesServerInfo(t *testing.T) {
 		},
 	}
 
-	result := buildInitializeResult(cfg, servers)
+	result := buildInitializeResult(cfg, servers, nil)
 
 	serverInfoValue, ok := result["serverInfo"]
 	if !ok {
@@ -196,6 +197,187 @@ func TestBuildManifestDocumentIncludesFacadeAndServerTools(t *testing.T) {
 	}
 }
 
+func TestManifestServerEntriesIncludesOnlyAggregator(t *testing.T) {
+	cfg := &Config{McpProxy: &MCPProxyConfigV2{Name: "Proxy", Type: MCPServerTypeStreamable, Version: "1.0.0"}}
+	manifestCfg := &ManifestConfig{ServerName: "stelae"}
+	doc := map[string]any{"endpointURL": "https://example.com/mcp"}
+
+	entries := manifestServerEntries(cfg, manifestCfg, doc)
+	if len(entries) != 1 {
+		t.Fatalf("expected single server entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry["name"] != "stelae" {
+		t.Fatalf("expected server name stelae, got %v", entry["name"])
+	}
+	if entry["transport"] != "streamable-http" {
+		t.Fatalf("expected transport streamable-http, got %v", entry["transport"])
+	}
+	if entry["url"] != "https://example.com/mcp" {
+		t.Fatalf("unexpected endpoint url: %v", entry["url"])
+	}
+	if entry["version"] != "1.0.0" {
+		t.Fatalf("unexpected version: %v", entry["version"])
+	}
+}
+
+func TestToolOverridesApplyAnnotations(t *testing.T) {
+	trueVal := true
+	manifestCfg := &ManifestConfig{
+		Name: "Proxy",
+		ToolOverrides: map[string]*ToolOverrideConfig{
+			"read_file": {
+				Annotations: &AnnotationOverrideConfig{ReadOnlyHint: &trueVal},
+			},
+		},
+	}
+	config := &Config{
+		McpProxy: &MCPProxyConfigV2{Name: "Proxy"},
+		Manifest: manifestCfg,
+	}
+	servers := map[string]*Server{
+		"fs": {
+			tools: []mcp.Tool{{Name: "read_file"}},
+		},
+	}
+
+	set := &ToolOverrideSet{ToolOverrides: copyToolOverrideMap(manifestCfg.ToolOverrides), Servers: make(map[string]*toolOverrideFragment)}
+	tools := collectTools(servers, set)
+	if len(tools) == 0 {
+		t.Fatalf("expected tools from collectTools")
+	}
+	found := false
+	for _, tool := range tools {
+		if tool["name"] != "read_file" {
+			continue
+		}
+		annotations, _ := tool["annotations"].(map[string]any)
+		if annotations == nil {
+			t.Fatalf("expected annotations map for read_file")
+		}
+		if v, ok := annotations["readOnlyHint"].(bool); !ok || !v {
+			t.Fatalf("expected readOnlyHint override true, got %v", annotations["readOnlyHint"])
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("read_file tool not found in collectTools output")
+	}
+
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("failed to parse base URL: %v", err)
+	}
+	doc := buildManifestDocumentWithOverrides(manifestCfg, baseURL, nil, []mcp.Tool{{Name: "read_file"}}, nil, nil, nil, set)
+	rawTools, ok := doc["tools"].([]any)
+	if !ok {
+		t.Fatalf("expected tools array in manifest")
+	}
+	found = false
+	for _, entry := range rawTools {
+		manifestTool := entry.(map[string]any)
+		if manifestTool["name"] != "read_file" {
+			continue
+		}
+		manifestAnnotations, _ := manifestTool["annotations"].(map[string]any)
+		if v, ok := manifestAnnotations["readOnlyHint"].(bool); !ok || !v {
+			t.Fatalf("expected manifest readOnlyHint override true, got %v", manifestAnnotations["readOnlyHint"])
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("read_file tool not found in manifest output")
+	}
+
+	init := buildInitializeResult(config, servers, set)
+	initTools, ok := init["tools"].([]map[string]any)
+	if !ok || len(initTools) == 0 {
+		t.Fatalf("expected tools in initialize result")
+	}
+	found = false
+	for _, tool := range initTools {
+		if tool["name"] != "read_file" {
+			continue
+		}
+		ann, _ := tool["annotations"].(map[string]any)
+		if v, ok := ann["readOnlyHint"].(bool); !ok || !v {
+			t.Fatalf("expected initialize readOnlyHint override true, got %v", ann)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("read_file tool not found in initialize output")
+	}
+}
+
+func TestToolsListHTTPHandlerReturnsCatalog(t *testing.T) {
+	var ready atomic.Bool
+	ready.Store(true)
+	servers := map[string]*Server{
+		"alpha": {
+			transport: MCPServerTypeStreamable,
+			tools:     []mcp.Tool{{Name: "fetch"}},
+		},
+	}
+	handler := toolsListHTTPHandler(&ready, servers, nil)
+	req := httptest.NewRequest(http.MethodGet, "/tools/list", nil)
+	resp := httptest.NewRecorder()
+	handler(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.Code)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode tools payload: %v", err)
+	}
+	items, ok := payload["tools"].([]any)
+	if !ok {
+		t.Fatalf("expected tools array in payload")
+	}
+	foundFetch := false
+	for _, item := range items {
+		if m, ok := item.(map[string]any); ok {
+			if name, _ := m["name"].(string); name == "fetch" {
+				foundFetch = true
+			}
+		}
+	}
+	if !foundFetch {
+		t.Fatalf("expected fetch tool in payload: %+v", items)
+	}
+}
+
+func TestToolsListHTTPHandlerRejectsNonGET(t *testing.T) {
+	handler := toolsListHTTPHandler(&atomic.Bool{}, map[string]*Server{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/tools/list", nil)
+	resp := httptest.NewRecorder()
+	handler(resp, req)
+
+	if resp.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", resp.Code)
+	}
+	if allow := resp.Header().Get("Allow"); allow != http.MethodGet {
+		t.Fatalf("expected Allow header 'GET', got %q", allow)
+	}
+}
+
+func TestStreamAliasHandlerForwardsToMCP(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := streamAliasHandler(mux, "/mcp")
+	req := httptest.NewRequest(http.MethodGet, "/stream", nil)
+	resp := httptest.NewRecorder()
+	handler(resp, req)
+
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("expected forwarded status 204, got %d", resp.Code)
+	}
+}
+
 func TestCollectToolsIncludesFacadeAndServerCatalog(t *testing.T) {
 	servers := map[string]*Server{
 		"alpha": {
@@ -223,7 +405,7 @@ func TestCollectToolsIncludesFacadeAndServerCatalog(t *testing.T) {
 		},
 	}
 
-	tools := collectTools(servers)
+	tools := collectTools(servers, nil)
 	if len(tools) != 3 {
 		t.Fatalf("expected facade search/fetch plus summarize, got %d", len(tools))
 	}
@@ -257,7 +439,7 @@ func TestCollectToolsIncludesFacadeAndServerCatalog(t *testing.T) {
 }
 
 func TestCollectToolsProvidesFacadeFallbacks(t *testing.T) {
-	tools := collectTools(map[string]*Server{})
+	tools := collectTools(map[string]*Server{}, nil)
 	if len(tools) != 2 {
 		t.Fatalf("expected facade fallback tools, got %d entries", len(tools))
 	}

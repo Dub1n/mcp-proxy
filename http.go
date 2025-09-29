@@ -297,6 +297,26 @@ func buildManifestDocument(
 	resources []mcp.Resource,
 	templates []mcp.ResourceTemplate,
 ) map[string]any {
+	var overrides *ToolOverrideSet
+	if manifestCfg != nil && len(manifestCfg.ToolOverrides) > 0 {
+		overrides = &ToolOverrideSet{
+			ToolOverrides: copyToolOverrideMap(manifestCfg.ToolOverrides),
+			Servers:       make(map[string]*toolOverrideFragment),
+		}
+	}
+	return buildManifestDocumentWithOverrides(manifestCfg, baseURL, r, tools, prompts, resources, templates, overrides)
+}
+
+func buildManifestDocumentWithOverrides(
+	manifestCfg *ManifestConfig,
+	baseURL *url.URL,
+	r *http.Request,
+	tools []mcp.Tool,
+	prompts []mcp.Prompt,
+	resources []mcp.Resource,
+	templates []mcp.ResourceTemplate,
+	overrides *ToolOverrideSet,
+) map[string]any {
 	if manifestCfg == nil {
 		manifestCfg = &ManifestConfig{}
 	}
@@ -347,9 +367,14 @@ func buildManifestDocument(
 		if descriptor == nil {
 			continue
 		}
-		if _, exists := toolDescriptors[tool.Name]; !exists {
+		if existing, exists := toolDescriptors[tool.Name]; exists {
+			toolDescriptors[tool.Name] = mergeToolDescriptors(existing, descriptor)
+		} else {
 			toolDescriptors[tool.Name] = descriptor
 		}
+	}
+	for name, descriptor := range toolDescriptors {
+		toolDescriptors[name] = applyToolOverride(name, descriptor, overrides)
 	}
 
 	if _, ok := toolDescriptors[facadeSearchToolName]; !ok {
@@ -358,6 +383,8 @@ func buildManifestDocument(
 	if _, ok := toolDescriptors[facadeFetchToolName]; !ok {
 		toolDescriptors[facadeFetchToolName] = fetchManifestDescriptor()
 	}
+	toolDescriptors[facadeSearchToolName] = applyToolOverride(facadeSearchToolName, toolDescriptors[facadeSearchToolName], overrides)
+	toolDescriptors[facadeFetchToolName] = applyToolOverride(facadeFetchToolName, toolDescriptors[facadeFetchToolName], overrides)
 
 	toolNames := make([]string, 0, len(toolDescriptors))
 	for name := range toolDescriptors {
@@ -386,6 +413,110 @@ func buildManifestDocument(
 	return payload
 }
 
+func manifestServerEntries(
+	config *Config,
+	manifestCfg *ManifestConfig,
+	doc map[string]any,
+) []map[string]any {
+	name := resolveManifestServerName(config, manifestCfg)
+	transport := resolveManifestTransport(config)
+	endpointURL := resolveManifestEndpointURL(doc)
+	version := resolveManifestVersion(config, manifestCfg, doc)
+	return []map[string]any{
+		{
+			"name":      name,
+			"transport": transport,
+			"url":       endpointURL,
+			"version":   version,
+		},
+	}
+}
+
+func resolveManifestServerName(config *Config, manifestCfg *ManifestConfig) string {
+	if manifestCfg != nil {
+		if name := strings.TrimSpace(manifestCfg.ServerName); name != "" {
+			return name
+		}
+	}
+	if config != nil && config.McpProxy != nil {
+		if name := strings.TrimSpace(config.McpProxy.Name); name != "" {
+			return name
+		}
+	}
+	return "proxy"
+}
+
+func resolveManifestTransport(config *Config) string {
+	if config != nil && config.McpProxy != nil && config.McpProxy.Type != "" {
+		return string(config.McpProxy.Type)
+	}
+	return string(MCPServerTypeStreamable)
+}
+
+func resolveManifestEndpointURL(doc map[string]any) string {
+	if doc != nil {
+		if endpoint, ok := doc["endpointURL"].(string); ok && endpoint != "" {
+			return endpoint
+		}
+	}
+	return ""
+}
+
+func resolveManifestVersion(config *Config, manifestCfg *ManifestConfig, doc map[string]any) string {
+	if manifestCfg != nil && strings.TrimSpace(manifestCfg.Version) != "" {
+		return strings.TrimSpace(manifestCfg.Version)
+	}
+	if config != nil && config.McpProxy != nil && strings.TrimSpace(config.McpProxy.Version) != "" {
+		return strings.TrimSpace(config.McpProxy.Version)
+	}
+	if doc != nil {
+		if version, ok := doc["version"].(string); ok && strings.TrimSpace(version) != "" {
+			return strings.TrimSpace(version)
+		}
+	}
+	return ""
+}
+
+func toolsListHTTPHandler(clientsReady *atomic.Bool, servers map[string]*Server, overrides *ToolOverrideSet) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if waitForClients(clientsReady, 2*time.Second) {
+			w.Header().Set("X-Proxy-Waited-For-Init", "true")
+		}
+
+		items := collectTools(servers, overrides)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"tools": items})
+	}
+}
+
+func streamAliasHandler(mux *http.ServeMux, targetPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL = &url.URL{Path: targetPath, RawQuery: r.URL.RawQuery}
+		r2.RequestURI = ""
+		mux.ServeHTTP(w, r2)
+	}
+}
+
+func waitForClients(clientsReady *atomic.Bool, timeout time.Duration) bool {
+	if clientsReady == nil {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	waited := false
+	for !clientsReady.Load() && time.Now().Before(deadline) {
+		waited = true
+		time.Sleep(50 * time.Millisecond)
+	}
+	return waited
+}
+
 func handleNotification(w http.ResponseWriter, req *jsonrpcRequest) bool {
 	if req == nil || req.ID != nil {
 		return false
@@ -407,6 +538,10 @@ func startHTTPServer(config *Config) error {
 
 	var eg errgroup.Group
 	httpMux := http.NewServeMux()
+	mcpPath := path.Join(baseURL.Path, "mcp")
+	if !strings.HasPrefix(mcpPath, "/") {
+		mcpPath = "/" + mcpPath
+	}
 
 	// all connected servers
 	servers := make(map[string]*Server)
@@ -452,6 +587,20 @@ func startHTTPServer(config *Config) error {
 			Description: "",
 		}
 	}
+	var toolOverrides *ToolOverrideSet
+	if len(manifestCfg.ToolOverrides) > 0 {
+		toolOverrides = &ToolOverrideSet{
+			ToolOverrides: copyToolOverrideMap(manifestCfg.ToolOverrides),
+			Servers:       make(map[string]*toolOverrideFragment),
+		}
+	}
+	if manifestCfg.ToolOverridesPath != "" {
+		if fileOverrides, err := loadToolOverridesFromPath(manifestCfg.ToolOverridesPath); err != nil {
+			log.Printf("<manifest> failed to load tool overrides from %s: %v", manifestCfg.ToolOverridesPath, err)
+		} else {
+			toolOverrides = mergeOverrideSets(toolOverrides, fileOverrides)
+		}
+	}
 
 	httpMux.HandleFunc("/.well-known/mcp/manifest.json", func(w http.ResponseWriter, r *http.Request) {
 		allTools := make([]mcp.Tool, 0)
@@ -459,18 +608,39 @@ func startHTTPServer(config *Config) error {
 		allResources := make([]mcp.Resource, 0)
 		allResourceTemplates := make([]mcp.ResourceTemplate, 0)
 
-		for _, srv := range servers {
-			allTools = append(allTools, srv.tools...)
+		for name, srv := range servers {
+			if !serverEnabled(toolOverrides, name) {
+				continue
+			}
+			for _, tool := range srv.tools {
+				if !toolEnabled(toolOverrides, name, tool.Name) {
+					continue
+				}
+				allTools = append(allTools, tool)
+			}
 			allPrompts = append(allPrompts, srv.prompts...)
 			allResources = append(allResources, srv.resources...)
 			allResourceTemplates = append(allResourceTemplates, srv.resourceTemplates...)
 		}
 
-		doc := buildManifestDocument(manifestCfg, baseURL, r, allTools, allPrompts, allResources, allResourceTemplates)
+		doc := buildManifestDocumentWithOverrides(manifestCfg, baseURL, r, allTools, allPrompts, allResources, allResourceTemplates, toolOverrides)
+		doc["servers"] = manifestServerEntries(config, manifestCfg, doc)
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(doc)
 	})
+
+	toolsPath := path.Join(baseURL.Path, "tools/list")
+	if !strings.HasPrefix(toolsPath, "/") {
+		toolsPath = "/" + toolsPath
+	}
+	httpMux.HandleFunc(toolsPath, toolsListHTTPHandler(&clientsReady, servers, toolOverrides))
+
+	streamPath := path.Join(baseURL.Path, "stream")
+	if !strings.HasPrefix(streamPath, "/") {
+		streamPath = "/" + streamPath
+	}
+	httpMux.HandleFunc(streamPath, streamAliasHandler(httpMux, mcpPath))
 
 	// ---- build servers and mount per-server handlers ----
 	info := mcp.Implementation{Name: config.McpProxy.Name}
@@ -584,10 +754,6 @@ func startHTTPServer(config *Config) error {
 	}
 
 	// ---- /mcp facade ----
-	mcpPath := path.Join(baseURL.Path, "mcp")
-	if !strings.HasPrefix(mcpPath, "/") {
-		mcpPath = "/" + mcpPath
-	}
 	httpMux.HandleFunc(mcpPath, func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("<facade> %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 		switch r.Method {
@@ -661,7 +827,7 @@ func startHTTPServer(config *Config) error {
 					w.Header().Set("X-Proxy-Waited-For-Init", "true")
 				}
 
-				result := buildInitializeResult(config, servers)
+				result := buildInitializeResult(config, servers, toolOverrides)
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(rpcOK(req.ID, result))
 				return
@@ -678,7 +844,7 @@ func startHTTPServer(config *Config) error {
 					w.Header().Set("X-Proxy-Waited-For-Init", "true")
 				}
 
-				items := collectTools(servers)
+				items := collectTools(servers, toolOverrides)
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(rpcOK(req.ID, map[string]any{"tools": items}))
 				return
