@@ -52,3 +52,21 @@ func buildFacadeSearchPayload(_ string) map[string]any {
 	}
 	return map[string]any{"results": results}
 }
+
+func buildFacadeFetchPayload(id string) (map[string]any, bool) {
+	for _, hit := range defaultFacadeSearchHits {
+		if hit.ID != id {
+			continue
+		}
+		return map[string]any{
+			"id":    hit.ID,
+			"title": hit.Title,
+			"text":  hit.Text,
+			"url":   hit.URL,
+			"metadata": map[string]any{
+				"snippet": hit.Snippet,
+			},
+		}, true
+	}
+	return nil, false
+}

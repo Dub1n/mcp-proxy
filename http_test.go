@@ -91,8 +91,8 @@ func TestBuildInitializeResultIncludesServerInfo(t *testing.T) {
 		t.Fatalf("expected tools list but got %T", result["tools"])
 	}
 
-	if len(toolsValue) != 2 {
-		t.Fatalf("expected 2 facade tools (search/fetch), got %d", len(toolsValue))
+	if len(toolsValue) != 3 {
+		t.Fatalf("expected tools to include echo, search, fetch; got %d", len(toolsValue))
 	}
 
 	found := make(map[string]map[string]any)
@@ -106,6 +106,9 @@ func TestBuildInitializeResultIncludesServerInfo(t *testing.T) {
 	}
 	if _, ok := found[facadeFetchToolName]; !ok {
 		t.Fatalf("expected facade fetch tool present")
+	}
+	if _, ok := found["echo"]; !ok {
+		t.Fatalf("expected echo tool present")
 	}
 
 	promptsValue, ok := result["prompts"].([]map[string]any)
@@ -144,7 +147,7 @@ func TestHandleNotificationSkipsRequestsWithID(t *testing.T) {
 	}
 }
 
-func TestBuildManifestDocumentFiltersTools(t *testing.T) {
+func TestBuildManifestDocumentIncludesFacadeAndServerTools(t *testing.T) {
 	manifestCfg := &ManifestConfig{Name: "Proxy", Version: "1.0.0", Description: ""}
 	baseURL, err := url.Parse("https://example.com")
 	if err != nil {
@@ -164,8 +167,8 @@ func TestBuildManifestDocumentFiltersTools(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected tools slice, got %T", doc["tools"])
 	}
-	if len(rawTools) != 2 {
-		t.Fatalf("expected exactly 2 tools (fetch/search), got %d", len(rawTools))
+	if len(rawTools) != 3 {
+		t.Fatalf("expected fetch, search, and extra tools, got %d", len(rawTools))
 	}
 
 	found := map[string]bool{}
@@ -188,12 +191,12 @@ func TestBuildManifestDocumentFiltersTools(t *testing.T) {
 	if !found[facadeSearchToolName] {
 		t.Fatalf("search tool missing from manifest")
 	}
-	if found["extra"] {
-		t.Fatalf("unexpected tool 'extra' present in manifest")
+	if !found["extra"] {
+		t.Fatalf("expected extra tool from upstream to be present")
 	}
 }
 
-func TestCollectToolsFiltersToFacadeCatalog(t *testing.T) {
+func TestCollectToolsIncludesFacadeAndServerCatalog(t *testing.T) {
 	servers := map[string]*Server{
 		"alpha": {
 			tools: []mcp.Tool{
@@ -221,8 +224,8 @@ func TestCollectToolsFiltersToFacadeCatalog(t *testing.T) {
 	}
 
 	tools := collectTools(servers)
-	if len(tools) != 2 {
-		t.Fatalf("expected 2 facade tools, got %d", len(tools))
+	if len(tools) != 3 {
+		t.Fatalf("expected facade search/fetch plus summarize, got %d", len(tools))
 	}
 
 	fetched := make(map[string]map[string]any)
@@ -244,13 +247,12 @@ func TestCollectToolsFiltersToFacadeCatalog(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected fetch tool present after filtering")
 	}
-	if desc := fetch["description"]; desc != "Document fetch" {
-		t.Fatalf("fetch descriptor description = %v, want %q", desc, "Document fetch")
-	}
-	assertSchemaContains(t, fetch["inputSchema"], "url")
+	assertSchemaContains(t, fetch["inputSchema"], "id")
 
-	if _, extraPresent := fetched["summarize"]; extraPresent {
-		t.Fatalf("unexpected extra tool summarize present")
+	if summarize, extraPresent := fetched["summarize"]; !extraPresent {
+		t.Fatalf("expected summarize tool to be present")
+	} else if desc := summarize["description"]; desc != "Summarize documents" {
+		t.Fatalf("summarize descriptor description = %v, want %q", desc, "Summarize documents")
 	}
 }
 
@@ -265,7 +267,7 @@ func TestCollectToolsProvidesFacadeFallbacks(t *testing.T) {
 		fetched[name] = true
 		requiredField := map[string]string{
 			facadeSearchToolName: "query",
-			facadeFetchToolName:  "url",
+			facadeFetchToolName:  "id",
 		}[name]
 		if requiredField != "" {
 			assertSchemaContains(t, tool["inputSchema"], requiredField)

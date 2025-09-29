@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -192,13 +193,14 @@ func handleSSE(w http.ResponseWriter, r *http.Request, endpoint string) {
 				endpointPath := fmt.Sprintf("%s?session_id=%s", mountPath, sessionHex)
 				fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointPath)
 				flusher.Flush()
-				goto endpoint_done
+				goto endpointDone
 			}
 		}
 		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpoint)
 		flusher.Flush()
 	}
-endpoint_done:
+
+endpointDone:
 
 	readyAnnounced := emitReadinessEvent(w, flusher)
 
@@ -334,31 +336,38 @@ func buildManifestDocument(
 		resourceEntries = append(resourceEntries, res)
 	}
 
-	toolEntries := make([]any, 0, 2)
-	searchPresent := false
-	fetchPresent := false
+	toolDescriptors := make(map[string]map[string]any)
 	for _, tool := range tools {
-		switch tool.Name {
-		case facadeSearchToolName:
-			if searchPresent {
-				continue
-			}
-			toolEntries = append(toolEntries, tool)
-			searchPresent = true
-		case facadeFetchToolName:
-			if fetchPresent {
-				continue
-			}
-			toolEntries = append(toolEntries, tool)
-			fetchPresent = true
+		descriptor := toolDescriptorFromServer(tool)
+		if tool.Name == facadeSearchToolName {
+			descriptor = mergeWithFacadeDefaults(descriptor, searchToolDescriptor())
+		} else if tool.Name == facadeFetchToolName {
+			descriptor = mergeWithFacadeDefaults(descriptor, fetchToolDescriptor())
+		}
+		if descriptor == nil {
+			continue
+		}
+		if _, exists := toolDescriptors[tool.Name]; !exists {
+			toolDescriptors[tool.Name] = descriptor
 		}
 	}
 
-	if !searchPresent {
-		toolEntries = append(toolEntries, searchManifestDescriptor())
+	if _, ok := toolDescriptors[facadeSearchToolName]; !ok {
+		toolDescriptors[facadeSearchToolName] = searchManifestDescriptor()
 	}
-	if !fetchPresent {
-		toolEntries = append(toolEntries, fetchManifestDescriptor())
+	if _, ok := toolDescriptors[facadeFetchToolName]; !ok {
+		toolDescriptors[facadeFetchToolName] = fetchManifestDescriptor()
+	}
+
+	toolNames := make([]string, 0, len(toolDescriptors))
+	for name := range toolDescriptors {
+		toolNames = append(toolNames, name)
+	}
+	sort.Strings(toolNames)
+
+	toolEntries := make([]any, 0, len(toolNames))
+	for _, name := range toolNames {
+		toolEntries = append(toolEntries, toolDescriptors[name])
 	}
 
 	payload := map[string]any{
@@ -865,6 +874,30 @@ func startHTTPServer(config *Config) error {
 					} else {
 						log.Printf("<facade> tools/call search (static) query=%q", searchArgs.Query)
 					}
+					return
+				}
+
+				if p.Name == facadeFetchToolName {
+					var fetchArgs struct {
+						ID string `json:"id"`
+					}
+					if len(p.Arguments) > 0 {
+						_ = json.Unmarshal(p.Arguments, &fetchArgs)
+					}
+					if fetchArgs.ID == "" {
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(rpcError(req.ID, -32602, "Missing fetch id"))
+						return
+					}
+					if payload, ok := buildFacadeFetchPayload(fetchArgs.ID); ok {
+						w.Header().Set("Content-Type", "application/json")
+						_ = json.NewEncoder(w).Encode(rpcOK(req.ID, payload))
+						log.Printf("<facade> tools/call fetch (static) id=%q", fetchArgs.ID)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(rpcError(req.ID, -32005, "Unknown fetch id"))
+					log.Printf("<facade> tools/call fetch unknown id=%s", fetchArgs.ID)
 					return
 				}
 

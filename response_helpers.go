@@ -1,34 +1,48 @@
 package main
 
-import "github.com/mark3labs/mcp-go/mcp"
+import (
+	"sort"
+
+	"github.com/mark3labs/mcp-go/mcp"
+)
 
 func collectTools(servers map[string]*Server) []map[string]any {
-	var searchDescriptor map[string]any
-	var fetchDescriptor map[string]any
-
+	seen := make(map[string]map[string]any)
 	for _, srv := range servers {
 		for _, tool := range srv.tools {
-			switch tool.Name {
-			case facadeSearchToolName:
-				if searchDescriptor == nil {
-					searchDescriptor = mergeWithFacadeDefaults(toolDescriptorFromServer(tool), searchToolDescriptor())
-				}
-			case facadeFetchToolName:
-				if fetchDescriptor == nil {
-					fetchDescriptor = mergeWithFacadeDefaults(toolDescriptorFromServer(tool), fetchToolDescriptor())
-				}
+			descriptor := toolDescriptorFromServer(tool)
+			if tool.Name == facadeSearchToolName {
+				descriptor = ensureSearchDescriptor(descriptor)
+			} else if tool.Name == facadeFetchToolName {
+				descriptor = ensureFetchDescriptor(descriptor)
+			}
+			if descriptor == nil {
+				continue
+			}
+			if _, exists := seen[tool.Name]; !exists {
+				seen[tool.Name] = descriptor
 			}
 		}
 	}
 
-	if searchDescriptor == nil {
-		searchDescriptor = searchToolDescriptor()
+	if _, ok := seen[facadeSearchToolName]; !ok {
+		seen[facadeSearchToolName] = ensureSearchDescriptor(nil)
 	}
-	if fetchDescriptor == nil {
-		fetchDescriptor = fetchToolDescriptor()
+	if _, ok := seen[facadeFetchToolName]; !ok {
+		seen[facadeFetchToolName] = ensureFetchDescriptor(nil)
 	}
 
-	return []map[string]any{searchDescriptor, fetchDescriptor}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	result := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		result = append(result, seen[name])
+	}
+	return result
 }
 
 func toolDescriptorFromServer(tool mcp.Tool) map[string]any {
@@ -206,14 +220,129 @@ func fetchToolDescriptor() map[string]any {
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"url": map[string]any{
-					"title": "Url",
+				"id": map[string]any{
+					"title": "Id",
 					"type":  "string",
 				},
 			},
-			"required": []string{"url"},
+			"required": []string{"id"},
 		},
 	}
+}
+
+func ensureSearchDescriptor(descriptor map[string]any) map[string]any {
+	base := mergeWithFacadeDefaults(descriptor, searchToolDescriptor())
+	schema, _ := base["inputSchema"].(map[string]any)
+	if schema == nil {
+		base["inputSchema"] = searchToolDescriptor()["inputSchema"]
+		return base
+	}
+	props := ensurePropertiesMap(schema)
+	fallbackProps, _ := searchToolDescriptor()["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	if fallbackProps != nil {
+		if _, ok := props["query"]; !ok {
+			props["query"] = fallbackProps["query"]
+		}
+	}
+	ensureRequiredField(schema, "query")
+	return base
+}
+
+func ensureFetchDescriptor(descriptor map[string]any) map[string]any {
+	base := mergeWithFacadeDefaults(descriptor, fetchToolDescriptor())
+	schema, _ := base["inputSchema"].(map[string]any)
+	if schema == nil {
+		base["inputSchema"] = fetchToolDescriptor()["inputSchema"]
+		return base
+	}
+	props := ensurePropertiesMap(schema)
+	fallbackSchema, _ := fetchToolDescriptor()["inputSchema"].(map[string]any)
+	if fallbackProps, ok := fallbackSchema["properties"].(map[string]any); ok {
+		props["id"] = fallbackProps["id"]
+	}
+	removeRequiredField(schema, "url")
+	ensureRequiredField(schema, "id")
+	return base
+}
+
+func ensurePropertiesMap(schema map[string]any) map[string]any {
+	if schema == nil {
+		return nil
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if props == nil {
+		props = make(map[string]any)
+		schema["properties"] = props
+	}
+	return props
+}
+
+func ensureRequiredField(schema map[string]any, field string) {
+	if field == "" || schema == nil {
+		return
+	}
+	var existing []string
+	if raw, ok := schema["required"]; ok {
+		switch v := raw.(type) {
+		case []string:
+			existing = append(existing, v...)
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					existing = append(existing, s)
+				}
+			}
+		}
+	}
+	for _, item := range existing {
+		if item == field {
+			out := make([]any, len(existing))
+			for i, val := range existing {
+				out[i] = val
+			}
+			schema["required"] = out
+			return
+		}
+	}
+	existing = append(existing, field)
+	out := make([]any, len(existing))
+	for i, val := range existing {
+		out[i] = val
+	}
+	schema["required"] = out
+}
+
+func removeRequiredField(schema map[string]any, field string) {
+	if field == "" || schema == nil {
+		return
+	}
+	var existing []string
+	if raw, ok := schema["required"]; ok {
+		switch v := raw.(type) {
+		case []string:
+			existing = append(existing, v...)
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					existing = append(existing, s)
+				}
+			}
+		}
+	}
+	if len(existing) == 0 {
+		return
+	}
+	filtered := make([]string, 0, len(existing))
+	for _, item := range existing {
+		if item != field {
+			filtered = append(filtered, item)
+		}
+	}
+	out := make([]any, len(filtered))
+	for i, val := range filtered {
+		out[i] = val
+	}
+	schema["required"] = out
 }
 
 func searchManifestDescriptor() map[string]any {
