@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,8 +15,11 @@ func TestLoadToolOverridesFromPath(t *testing.T) {
 	            "fs": {
 	                "tools": {
 	                    "read_file": {
+	                        "name": "fs_read_file",
+	                        "description": "Read with override",
 	                        "annotations": {
-	                            "readOnlyHint": true
+	                            "readOnlyHint": true,
+	                            "title": "FS Reader"
 	                        }
 	                    }
 	                }
@@ -24,6 +28,8 @@ func TestLoadToolOverridesFromPath(t *testing.T) {
 	        "master": {
 	            "tools": {
 	                "*": {
+	                    "name": "global_alias",
+	                    "description": "Master description",
 	                    "annotations": {
 	                        "openWorldHint": true
 	                    }
@@ -45,6 +51,40 @@ func TestLoadToolOverridesFromPath(t *testing.T) {
 	if set.ToolOverrides["*"] == nil {
 		t.Fatalf("expected master override entry present")
 	}
+	if set.ToolOverrides["*"].Name != nil {
+		t.Fatalf("expected master rename to be stripped, got %q", *set.ToolOverrides["*"].Name)
+	}
+	if set.ToolOverrides["*"].Description == nil {
+		t.Fatalf("expected master description preserved")
+	}
+	if len(set.Warnings) < 2 {
+		t.Fatalf("expected warnings for master overrides, got %#v", set.Warnings)
+	}
+	foundRename := false
+	foundDescription := false
+	for _, msg := range set.Warnings {
+		if strings.Contains(msg, "cannot rename") {
+			foundRename = true
+		}
+		if strings.Contains(msg, "description override") {
+			foundDescription = true
+		}
+	}
+	if !foundRename {
+		t.Fatalf("expected rename warning in %#v", set.Warnings)
+	}
+	if !foundDescription {
+		t.Fatalf("expected description warning in %#v", set.Warnings)
+	}
+	if alias, ok := set.AliasForTool("read_file"); !ok || alias != "fs_read_file" {
+		t.Fatalf("expected alias mapping for read_file, got %q", alias)
+	}
+	if original, ok := set.OriginalForAlias("fs_read_file"); !ok || original != "read_file" {
+		t.Fatalf("expected reverse alias mapping, got %q", original)
+	}
+	if renamed := set.Renamed["read_file"]; renamed != "fs_read_file" {
+		t.Fatalf("expected renamed map entry, got %q", renamed)
+	}
 	descriptor := map[string]any{"annotations": map[string]any{}}
 	descriptor = applyToolOverride("read_file", descriptor, set)
 	ann, _ := descriptor["annotations"].(map[string]any)
@@ -56,6 +96,15 @@ func TestLoadToolOverridesFromPath(t *testing.T) {
 	}
 	if v, ok := ann["openWorldHint"].(bool); !ok || !v {
 		t.Fatalf("expected master openWorldHint true, got %v", ann["openWorldHint"])
+	}
+	if title, ok := ann["title"].(string); !ok || title != "FS Reader" {
+		t.Fatalf("expected title override, got %v", ann["title"])
+	}
+	if desc, ok := descriptor["description"].(string); !ok || desc != "Read with override" {
+		t.Fatalf("expected description override, got %v", descriptor["description"])
+	}
+	if name, ok := descriptor["name"].(string); !ok || name != "fs_read_file" {
+		t.Fatalf("expected name override to apply, got %v", descriptor["name"])
 	}
 }
 

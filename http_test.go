@@ -223,11 +223,16 @@ func TestManifestServerEntriesIncludesOnlyAggregator(t *testing.T) {
 
 func TestToolOverridesApplyAnnotations(t *testing.T) {
 	trueVal := true
+	alias := "fs_read_file"
+	description := "Read file via proxy"
+	title := "Read File (Proxy)"
 	manifestCfg := &ManifestConfig{
 		Name: "Proxy",
 		ToolOverrides: map[string]*ToolOverrideConfig{
 			"read_file": {
-				Annotations: &AnnotationOverrideConfig{ReadOnlyHint: &trueVal},
+				Name:        &alias,
+				Description: &description,
+				Annotations: &AnnotationOverrideConfig{ReadOnlyHint: &trueVal, Title: &title},
 			},
 		},
 	}
@@ -241,14 +246,20 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 		},
 	}
 
-	set := &ToolOverrideSet{ToolOverrides: copyToolOverrideMap(manifestCfg.ToolOverrides), Servers: make(map[string]*toolOverrideFragment)}
+	set := &ToolOverrideSet{
+		ToolOverrides: copyToolOverrideMap(manifestCfg.ToolOverrides),
+		Servers:       make(map[string]*toolOverrideFragment),
+		Aliases:       make(map[string]string),
+		Renamed:       make(map[string]string),
+	}
+	sanitizeToolOverrideSet(set)
 	tools := collectTools(servers, set)
 	if len(tools) == 0 {
 		t.Fatalf("expected tools from collectTools")
 	}
 	found := false
 	for _, tool := range tools {
-		if tool["name"] != "read_file" {
+		if tool["name"] != "fs_read_file" {
 			continue
 		}
 		annotations, _ := tool["annotations"].(map[string]any)
@@ -257,6 +268,15 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 		}
 		if v, ok := annotations["readOnlyHint"].(bool); !ok || !v {
 			t.Fatalf("expected readOnlyHint override true, got %v", annotations["readOnlyHint"])
+		}
+		if titleVal, ok := annotations["title"].(string); !ok || titleVal != "Read File (Proxy)" {
+			t.Fatalf("expected title override, got %v", annotations["title"])
+		}
+		if desc, ok := tool["description"].(string); !ok || desc != "Read file via proxy" {
+			t.Fatalf("expected description override, got %v", tool["description"])
+		}
+		if name, ok := tool["name"].(string); !ok || name != "fs_read_file" {
+			t.Fatalf("expected alias applied, got %v", tool["name"])
 		}
 		found = true
 	}
@@ -276,12 +296,21 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 	found = false
 	for _, entry := range rawTools {
 		manifestTool := entry.(map[string]any)
-		if manifestTool["name"] != "read_file" {
+		if manifestTool["name"] != "fs_read_file" {
 			continue
 		}
 		manifestAnnotations, _ := manifestTool["annotations"].(map[string]any)
 		if v, ok := manifestAnnotations["readOnlyHint"].(bool); !ok || !v {
 			t.Fatalf("expected manifest readOnlyHint override true, got %v", manifestAnnotations["readOnlyHint"])
+		}
+		if titleVal, ok := manifestAnnotations["title"].(string); !ok || titleVal != "Read File (Proxy)" {
+			t.Fatalf("expected manifest title override, got %v", manifestAnnotations["title"])
+		}
+		if desc, ok := manifestTool["description"].(string); !ok || desc != "Read file via proxy" {
+			t.Fatalf("expected manifest description override, got %v", manifestTool["description"])
+		}
+		if name, ok := manifestTool["name"].(string); !ok || name != "fs_read_file" {
+			t.Fatalf("expected manifest alias applied, got %v", manifestTool["name"])
 		}
 		found = true
 	}
@@ -296,12 +325,21 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 	}
 	found = false
 	for _, tool := range initTools {
-		if tool["name"] != "read_file" {
+		if tool["name"] != "fs_read_file" {
 			continue
 		}
 		ann, _ := tool["annotations"].(map[string]any)
 		if v, ok := ann["readOnlyHint"].(bool); !ok || !v {
 			t.Fatalf("expected initialize readOnlyHint override true, got %v", ann)
+		}
+		if annTitle, ok := ann["title"].(string); !ok || annTitle != "Read File (Proxy)" {
+			t.Fatalf("expected initialize title override, got %v", ann["title"])
+		}
+		if desc, ok := tool["description"].(string); !ok || desc != "Read file via proxy" {
+			t.Fatalf("expected initialize description override, got %v", tool["description"])
+		}
+		if name, ok := tool["name"].(string); !ok || name != "fs_read_file" {
+			t.Fatalf("expected initialize alias applied, got %v", tool["name"])
 		}
 		found = true
 	}

@@ -126,14 +126,30 @@ func mergeAnnotations(existing, candidate any) map[string]any {
 }
 
 func applyToolOverride(name string, descriptor map[string]any, set *ToolOverrideSet) map[string]any {
-	if descriptor == nil || set == nil || len(set.ToolOverrides) == 0 {
+	if descriptor == nil || set == nil {
 		return descriptor
 	}
-	if master := set.ToolOverrides["*"]; master != nil && master.Annotations != nil {
-		descriptor["annotations"] = applyAnnotationOverride(descriptor["annotations"], master.Annotations)
+	if master := set.ToolOverrides["*"]; master != nil {
+		descriptor = applySingleOverride(descriptor, master, false)
 	}
-	if override := set.ToolOverrides[name]; override != nil && override.Annotations != nil {
+	if override := set.ToolOverrides[name]; override != nil {
+		descriptor = applySingleOverride(descriptor, override, true)
+	}
+	return descriptor
+}
+
+func applySingleOverride(descriptor map[string]any, override *ToolOverrideConfig, allowRename bool) map[string]any {
+	if descriptor == nil || override == nil {
+		return descriptor
+	}
+	if override.Annotations != nil {
 		descriptor["annotations"] = applyAnnotationOverride(descriptor["annotations"], override.Annotations)
+	}
+	if override.Description != nil {
+		descriptor["description"] = *override.Description
+	}
+	if allowRename && override.Name != nil {
+		descriptor["name"] = *override.Name
 	}
 	return descriptor
 }
@@ -142,6 +158,9 @@ func applyAnnotationOverride(existing any, override *AnnotationOverrideConfig) m
 	annotations, _ := existing.(map[string]any)
 	if annotations == nil {
 		annotations = make(map[string]any)
+	}
+	if override.Title != nil {
+		annotations["title"] = *override.Title
 	}
 	if override.ReadOnlyHint != nil {
 		annotations["readOnlyHint"] = *override.ReadOnlyHint

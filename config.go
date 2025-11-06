@@ -70,28 +70,31 @@ type OptionsV2 struct {
 }
 
 type ManifestConfig struct {
-	Name          string                         `json:"name"`
-	Version       string                         `json:"version"`
-	Description   string                         `json:"description,omitempty"`
-	PublicBaseURL string                         `json:"publicBaseURL,omitempty"`
-	LocalBaseURL  string                         `json:"localBaseURL,omitempty"`
-	SSEEndpoint   string                         `json:"sseEndpoint"`
-	ServerName    string                         `json:"serverName,omitempty"`
-	Resources     []interface{}                  `json:"resources,omitempty"`
-	ToolOverrides map[string]*ToolOverrideConfig `json:"toolOverrides,omitempty"`
-	ToolOverridesPath string                     `json:"toolOverridesPath,omitempty"`
+	Name              string                         `json:"name"`
+	Version           string                         `json:"version"`
+	Description       string                         `json:"description,omitempty"`
+	PublicBaseURL     string                         `json:"publicBaseURL,omitempty"`
+	LocalBaseURL      string                         `json:"localBaseURL,omitempty"`
+	SSEEndpoint       string                         `json:"sseEndpoint"`
+	ServerName        string                         `json:"serverName,omitempty"`
+	Resources         []interface{}                  `json:"resources,omitempty"`
+	ToolOverrides     map[string]*ToolOverrideConfig `json:"toolOverrides,omitempty"`
+	ToolOverridesPath string                         `json:"toolOverridesPath,omitempty"`
 }
 
 type ToolOverrideConfig struct {
 	Annotations *AnnotationOverrideConfig `json:"annotations,omitempty"`
+	Description *string                   `json:"description,omitempty"`
+	Name        *string                   `json:"name,omitempty"`
 	Enabled     *bool                     `json:"enabled,omitempty"`
 }
 
 type AnnotationOverrideConfig struct {
-	ReadOnlyHint    *bool `json:"readOnlyHint,omitempty"`
-	DestructiveHint *bool `json:"destructiveHint,omitempty"`
-	IdempotentHint  *bool `json:"idempotentHint,omitempty"`
-	OpenWorldHint   *bool `json:"openWorldHint,omitempty"`
+	Title           *string `json:"title,omitempty"`
+	ReadOnlyHint    *bool   `json:"readOnlyHint,omitempty"`
+	DestructiveHint *bool   `json:"destructiveHint,omitempty"`
+	IdempotentHint  *bool   `json:"idempotentHint,omitempty"`
+	OpenWorldHint   *bool   `json:"openWorldHint,omitempty"`
 }
 
 type MCPProxyConfigV2 struct {

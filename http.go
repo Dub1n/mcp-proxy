@@ -545,6 +545,7 @@ func startHTTPServer(config *Config) error {
 
 	// all connected servers
 	servers := make(map[string]*Server)
+	var toolOverrides *ToolOverrideSet
 
 	// catalog indexes (name/uri -> serverName) + readiness state
 	var (
@@ -563,6 +564,9 @@ func startHTTPServer(config *Config) error {
 		for name, srv := range servers {
 			for _, t := range srv.tools {
 				tmpTools[t.Name] = name
+				if alias, ok := toolOverrides.AliasForTool(t.Name); ok {
+					tmpTools[alias] = name
+				}
 			}
 			for _, p := range srv.prompts {
 				tmpPrompts[p.Name] = name
@@ -587,18 +591,25 @@ func startHTTPServer(config *Config) error {
 			Description: "",
 		}
 	}
-	var toolOverrides *ToolOverrideSet
 	if len(manifestCfg.ToolOverrides) > 0 {
 		toolOverrides = &ToolOverrideSet{
 			ToolOverrides: copyToolOverrideMap(manifestCfg.ToolOverrides),
 			Servers:       make(map[string]*toolOverrideFragment),
+			Aliases:       make(map[string]string),
+			Renamed:       make(map[string]string),
 		}
+		sanitizeToolOverrideSet(toolOverrides)
 	}
 	if manifestCfg.ToolOverridesPath != "" {
 		if fileOverrides, err := loadToolOverridesFromPath(manifestCfg.ToolOverridesPath); err != nil {
 			log.Printf("<manifest> failed to load tool overrides from %s: %v", manifestCfg.ToolOverridesPath, err)
 		} else {
 			toolOverrides = mergeOverrideSets(toolOverrides, fileOverrides)
+		}
+	}
+	if toolOverrides != nil {
+		for _, msg := range toolOverrides.Warnings {
+			log.Printf("<manifest> %s", msg)
 		}
 	}
 
@@ -688,6 +699,9 @@ func startHTTPServer(config *Config) error {
 			indexMu.Lock()
 			for _, t := range serverCopy.tools {
 				toolIndex[t.Name] = nameCopy
+				if alias, ok := toolOverrides.AliasForTool(t.Name); ok {
+					toolIndex[alias] = nameCopy
+				}
 			}
 			for _, p := range serverCopy.prompts {
 				promptIndex[p.Name] = nameCopy
@@ -1025,6 +1039,13 @@ func startHTTPServer(config *Config) error {
 					return
 				}
 
+				incomingName := p.Name
+				if toolOverrides != nil {
+					if original, ok := toolOverrides.OriginalForAlias(p.Name); ok {
+						p.Name = original
+					}
+				}
+
 				if p.Name == facadeSearchToolName {
 					var searchArgs struct {
 						Query string `json:"query"`
@@ -1080,7 +1101,7 @@ func startHTTPServer(config *Config) error {
 				if !ok {
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode(rpcError(req.ID, -32601, "Unknown tool: "+p.Name))
-					log.Printf("<facade> tools/call unknown tool=%s", p.Name)
+					log.Printf("<facade> tools/call unknown tool=%s", incomingName)
 					return
 				}
 
@@ -1094,7 +1115,7 @@ func startHTTPServer(config *Config) error {
 
 				if status >= 200 && status <= 204 {
 					rr.FlushTo(w)
-					log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d", p.Name, serverName, chosen, status)
+					log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d", incomingName, serverName, chosen, status)
 					return
 				}
 
