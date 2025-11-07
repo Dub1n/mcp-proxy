@@ -743,9 +743,11 @@ func startHTTPServer(config *Config) error {
 			path.Join(base, "rpc"),
 			path.Join(base, "jsonrpc"),
 		}
-		for _, p := range paths {
-			r2 := r.Clone(r.Context())
-			r2.Method = http.MethodPost
+        for _, p := range paths {
+            ctxTimeout, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+            defer cancel()
+            r2 := r.Clone(ctxTimeout)
+            r2.Method = http.MethodPost
 			r2.URL = &url.URL{Path: p}
 			r2.RequestURI = ""
 			r2.Body = io.NopCloser(bytes.NewReader(body))
@@ -906,8 +908,8 @@ func startHTTPServer(config *Config) error {
 					log.Printf("<facade> prompts/get unknown prompt=%s", p.Name)
 					return
 				}
-				rr := newResponseRecorder()
-				chosen, status := tryDispatch(serverName, body, r, rr)
+            rr := newResponseRecorder()
+            chosen, status := tryDispatch(serverName, body, r, rr)
 				w.Header().Set("X-Proxy-Dispatched-Server", serverName)
 				w.Header().Set("X-Proxy-Internal-Path", chosen)
 				w.Header().Set("X-Proxy-Internal-Status", http.StatusText(status))
@@ -1113,11 +1115,29 @@ func startHTTPServer(config *Config) error {
 				w.Header().Set("X-Proxy-Internal-Path", chosen)
 				w.Header().Set("X-Proxy-Internal-Status", http.StatusText(status))
 
-				if status >= 200 && status <= 204 {
-					rr.FlushTo(w)
-					log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d", incomingName, serverName, chosen, status)
-					return
-				}
+            if status >= 200 && status <= 204 {
+                // Adapt call result if needed
+                var payload map[string]any
+                if err := json.Unmarshal(rr.Body.Bytes(), &payload); err == nil {
+                    if _, ok := payload["result"].(map[string]any); ok {
+                        if modified, used, schema, err := adaptCallResult(serverName, incomingName, toolOverrides, manifestCfg, payload); err == nil {
+                            if modified {
+                                // persist overrides when schema chosen differs
+                                _ = writeServerToolOutputSchema(manifestCfg.ToolOverridesPath, serverName, incomingName, schema)
+                            }
+                            // write adapted response
+                            w.Header().Set("Content-Type", "application/json")
+                            _ = json.NewEncoder(w).Encode(payload)
+                            log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d adapter=%s", incomingName, serverName, chosen, status, used)
+                            return
+                        }
+                    }
+                }
+                // Fallback: flush upstream as-is
+                rr.FlushTo(w)
+                log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d", incomingName, serverName, chosen, status)
+                return
+            }
 
 				// none succeeded: protocol-level error rather than transport 404
 				w.Header().Set("Content-Type", "application/json")

@@ -80,13 +80,16 @@ type ManifestConfig struct {
 	Resources         []interface{}                  `json:"resources,omitempty"`
 	ToolOverrides     map[string]*ToolOverrideConfig `json:"toolOverrides,omitempty"`
 	ToolOverridesPath string                         `json:"toolOverridesPath,omitempty"`
+	ToolSchemaStatusPath string                      `json:"toolSchemaStatusPath,omitempty"`
 }
 
 type ToolOverrideConfig struct {
-	Annotations *AnnotationOverrideConfig `json:"annotations,omitempty"`
-	Description *string                   `json:"description,omitempty"`
-	Name        *string                   `json:"name,omitempty"`
-	Enabled     *bool                     `json:"enabled,omitempty"`
+	Annotations  *AnnotationOverrideConfig `json:"annotations,omitempty"`
+	Description  *string                   `json:"description,omitempty"`
+	Name         *string                   `json:"name,omitempty"`
+	Enabled      *bool                     `json:"enabled,omitempty"`
+	InputSchema  map[string]any            `json:"inputSchema,omitempty"`
+	OutputSchema map[string]any            `json:"outputSchema,omitempty"`
 }
 
 type AnnotationOverrideConfig struct {
