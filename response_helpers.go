@@ -6,8 +6,36 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+type aggregatedTool struct {
+	descriptor map[string]any
+	servers    map[string]struct{}
+}
+
+func newAggregatedTool(descriptor map[string]any) *aggregatedTool {
+	return &aggregatedTool{descriptor: descriptor, servers: make(map[string]struct{})}
+}
+
+func (a *aggregatedTool) addServer(name string) {
+	if name == "" {
+		return
+	}
+	a.servers[name] = struct{}{}
+}
+
+func (a *aggregatedTool) serverList() []string {
+	if len(a.servers) == 0 {
+		return nil
+	}
+	list := make([]string, 0, len(a.servers))
+	for name := range a.servers {
+		list = append(list, name)
+	}
+	sort.Strings(list)
+	return list
+}
+
 func collectTools(servers map[string]*Server, overrides *ToolOverrideSet) []map[string]any {
-	seen := make(map[string]map[string]any)
+	seen := make(map[string]*aggregatedTool)
 	for serverName, srv := range servers {
 		if !serverEnabled(overrides, serverName) {
 			continue
@@ -25,19 +53,28 @@ func collectTools(servers map[string]*Server, overrides *ToolOverrideSet) []map[
 			if descriptor == nil {
 				continue
 			}
-			if existing, exists := seen[tool.Name]; exists {
-				seen[tool.Name] = mergeToolDescriptors(existing, descriptor)
+			entry, exists := seen[tool.Name]
+			if exists {
+				entry.descriptor = mergeToolDescriptors(entry.descriptor, descriptor)
+				entry.addServer(serverName)
 			} else {
-				seen[tool.Name] = descriptor
+				copyDescriptor := descriptor
+				entry = newAggregatedTool(copyDescriptor)
+				entry.addServer(serverName)
+				seen[tool.Name] = entry
 			}
 		}
 	}
 
-	if _, ok := seen[facadeSearchToolName]; !ok {
-		seen[facadeSearchToolName] = ensureSearchDescriptor(nil)
+	if _, ok := seen[facadeSearchToolName]; !ok && toolEnabled(overrides, "facade", facadeSearchToolName) {
+		entry := newAggregatedTool(ensureSearchDescriptor(nil))
+		entry.addServer("facade")
+		seen[facadeSearchToolName] = entry
 	}
-	if _, ok := seen[facadeFetchToolName]; !ok {
-		seen[facadeFetchToolName] = ensureFetchDescriptor(nil)
+	if _, ok := seen[facadeFetchToolName]; !ok && toolEnabled(overrides, "facade", facadeFetchToolName) {
+		entry := newAggregatedTool(ensureFetchDescriptor(nil))
+		entry.addServer("facade")
+		seen[facadeFetchToolName] = entry
 	}
 
 	names := make([]string, 0, len(seen))
@@ -48,10 +85,30 @@ func collectTools(servers map[string]*Server, overrides *ToolOverrideSet) []map[
 
 	result := make([]map[string]any, 0, len(names))
 	for _, name := range names {
-		descriptor := applyToolOverride(name, seen[name], overrides)
+		entry := seen[name]
+		descriptor := applyToolOverride(name, entry.descriptor, overrides)
+		descriptor = attachStelaeMetadata(descriptor, entry.serverList())
 		result = append(result, descriptor)
 	}
 	return result
+}
+
+func attachStelaeMetadata(descriptor map[string]any, servers []string) map[string]any {
+	if descriptor == nil || len(servers) == 0 {
+		return descriptor
+	}
+	meta := map[string]any{
+		"servers":       servers,
+		"primaryServer": servers[0],
+	}
+	if existing, ok := descriptor["x-stelae"].(map[string]any); ok && existing != nil {
+		for k, v := range meta {
+			existing[k] = v
+		}
+		return descriptor
+	}
+	descriptor["x-stelae"] = meta
+	return descriptor
 }
 
 func toolDescriptorFromServer(tool mcp.Tool) map[string]any {
@@ -150,6 +207,12 @@ func applySingleOverride(descriptor map[string]any, override *ToolOverrideConfig
 	}
 	if allowRename && override.Name != nil {
 		descriptor["name"] = *override.Name
+	}
+	if override.InputSchema != nil {
+		descriptor["inputSchema"] = copySchemaMap(override.InputSchema)
+	}
+	if override.OutputSchema != nil {
+		descriptor["outputSchema"] = copySchemaMap(override.OutputSchema)
 	}
 	return descriptor
 }

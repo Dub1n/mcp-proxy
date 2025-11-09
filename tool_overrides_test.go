@@ -11,17 +11,27 @@ func TestLoadToolOverridesFromPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "overrides.json")
 	content := `{
-	        "servers": {
-	            "fs": {
-	                "tools": {
-	                    "read_file": {
-	                        "name": "fs_read_file",
-	                        "description": "Read with override",
-	                        "annotations": {
-	                            "readOnlyHint": true,
-	                            "title": "FS Reader"
-	                        }
+	    "servers": {
+	        "fs": {
+	            "tools": {
+	                "read_file": {
+	                    "name": "fs_read_file",
+	                    "description": "Read with override",
+	                    "inputSchema": {
+	                        "type": "object",
+	                        "properties": {"path": {"type": "string"}},
+	                        "required": ["path"]
+	                    },
+	                    "outputSchema": {
+	                        "type": "object",
+	                        "properties": {"result": {"type": "string"}},
+	                        "required": ["result"]
+	                    },
+	                    "annotations": {
+	                        "readOnlyHint": true,
+	                        "title": "FS Reader"
 	                    }
+	                }
 	                }
 	            }
 	        },
@@ -105,6 +115,18 @@ func TestLoadToolOverridesFromPath(t *testing.T) {
 	}
 	if name, ok := descriptor["name"].(string); !ok || name != "fs_read_file" {
 		t.Fatalf("expected name override to apply, got %v", descriptor["name"])
+	}
+	inputSchema, _ := descriptor["inputSchema"].(map[string]any)
+	if inputSchema == nil || inputSchema["type"] != "object" {
+		t.Fatalf("expected inputSchema override, got %v", descriptor["inputSchema"])
+	}
+	outputSchema, _ := descriptor["outputSchema"].(map[string]any)
+	if outputSchema == nil || outputSchema["type"] != "object" {
+		t.Fatalf("expected outputSchema override, got %v", descriptor["outputSchema"])
+	}
+	outputSchema["type"] = "string"
+	if orig := set.ToolOverrides["read_file"].OutputSchema["type"]; orig != "object" {
+		t.Fatalf("expected override map to remain unchanged, got %v", orig)
 	}
 }
 

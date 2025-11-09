@@ -88,3 +88,47 @@ Notes:
 - `mcpProxy.options.authTokens` serves as the default token set if a server omits `options.authTokens`.
 - To discover tool names for filtering, start without a filter and check logs for lines like `<server> Adding tool <name>`.
 
+## Tool overrides
+
+Expose consistent tool metadata (names, descriptions, annotations, schemas) even when downstream servers disagree.
+
+- Define overrides inline via `manifest.toolOverrides` or point to a JSON file with `manifest.toolOverridesPath`.
+- Override scopes:
+  - `master.tools` — applies to every tool (`"*"` entry) or specific names; cannot rename tools but can rewrite descriptions/annotations/schemas.
+  - `servers.<name>.tools` — restrict overrides to a single downstream server.
+  - `tools` — top-level, applies globally by tool name.
+- Supported fields per tool:
+  - `name` (alias), `description`, `enabled`
+  - `annotations.title`, `annotations.readOnlyHint`, `annotations.destructiveHint`, `annotations.idempotentHint`, `annotations.openWorldHint`
+  - `inputSchema`, `outputSchema` — supply full JSON Schema objects; the proxy advertises these in both `tools/list` and the manifest. When paired with a shim that rewrites the output, clients get exactly what the schema describes.
+
+Example override file:
+
+```jsonc
+{
+  "toolOverrides": {
+    "search": {
+      "description": "Workspace-aware search",
+      "annotations": {"readOnlyHint": true}
+    }
+  },
+  "servers": {
+    "scrapling": {
+      "tools": {
+        "s_fetch_page": {
+          "outputSchema": {
+            "type": "object",
+            "properties": {
+              "metadata": {"type": "object"},
+              "content": {"type": "string"}
+            },
+            "required": ["metadata", "content"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+At startup the proxy logs any warnings (e.g., invalid master renames) and applies overrides consistently across manifests, `initialize`, `tools/list`, and `tools/call` responses.

@@ -13,10 +13,10 @@ import (
 // ---- Status Store ----
 
 type toolStatusEntry struct {
-	LastAdapter            string  `json:"last_adapter"`
-	ConsecutiveGeneric     int     `json:"consecutive_generic_count"`
-	Note                   *string `json:"note,omitempty"`
-	UpdatedAt              int64   `json:"updated_at"`
+	LastAdapter        string  `json:"last_adapter"`
+	ConsecutiveGeneric int     `json:"consecutive_generic_count"`
+	Note               *string `json:"note,omitempty"`
+	UpdatedAt          int64   `json:"updated_at"`
 }
 
 type statusMap map[string]map[string]*toolStatusEntry // server -> tool -> entry
@@ -81,9 +81,10 @@ func getConsecutiveGeneric(path, server, tool string) int {
 // ---- Override Writer ----
 
 type overrideFile struct {
-	Tools   map[string]*ToolOverrideConfig   `json:"tools,omitempty"`
-	Master  *toolOverrideFragment            `json:"master,omitempty"`
-	Servers map[string]*toolOverrideFragment `json:"servers,omitempty"`
+	SchemaVersion int                              `json:"schemaVersion,omitempty"`
+	Tools         map[string]*ToolOverrideConfig   `json:"tools,omitempty"`
+	Master        *toolOverrideFragment            `json:"master,omitempty"`
+	Servers       map[string]*toolOverrideFragment `json:"servers,omitempty"`
 }
 
 func writeServerToolOutputSchema(path, server, tool string, schema map[string]any) error {
@@ -100,6 +101,9 @@ func writeServerToolOutputSchema(path, server, tool string, schema map[string]an
 	}
 	if file.Servers == nil {
 		file.Servers = make(map[string]*toolOverrideFragment)
+	}
+	if file.SchemaVersion < 2 {
+		file.SchemaVersion = 2
 	}
 	frag := file.Servers[server]
 	if frag == nil {

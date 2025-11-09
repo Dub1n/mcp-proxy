@@ -226,13 +226,29 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 	alias := "fs_read_file"
 	description := "Read file via proxy"
 	title := "Read File (Proxy)"
+	inputSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string"},
+		},
+		"required": []any{"path"},
+	}
+	outputSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"result": map[string]any{"type": "string"},
+		},
+		"required": []any{"result"},
+	}
 	manifestCfg := &ManifestConfig{
 		Name: "Proxy",
 		ToolOverrides: map[string]*ToolOverrideConfig{
 			"read_file": {
-				Name:        &alias,
-				Description: &description,
-				Annotations: &AnnotationOverrideConfig{ReadOnlyHint: &trueVal, Title: &title},
+				Name:         &alias,
+				Description:  &description,
+				Annotations:  &AnnotationOverrideConfig{ReadOnlyHint: &trueVal, Title: &title},
+				InputSchema:  inputSchema,
+				OutputSchema: outputSchema,
 			},
 		},
 	}
@@ -278,6 +294,35 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 		if name, ok := tool["name"].(string); !ok || name != "fs_read_file" {
 			t.Fatalf("expected alias applied, got %v", tool["name"])
 		}
+		if schema, ok := tool["inputSchema"].(map[string]any); !ok || schema["type"] != "object" {
+			t.Fatalf("expected inputSchema override, got %v", tool["inputSchema"])
+		}
+		if schema, ok := tool["outputSchema"].(map[string]any); !ok || schema["type"] != "object" {
+			t.Fatalf("expected outputSchema override, got %v", tool["outputSchema"])
+		}
+		meta, _ := tool["x-stelae"].(map[string]any)
+		if meta == nil {
+			t.Fatalf("expected x-stelae metadata for tool")
+		}
+		var servers []string
+		if raw, ok := meta["servers"].([]string); ok {
+			servers = raw
+		} else if rawAny, ok := meta["servers"].([]any); ok {
+			for _, entry := range rawAny {
+				if name, ok := entry.(string); ok {
+					servers = append(servers, name)
+				}
+			}
+		}
+		if len(servers) != 1 {
+			t.Fatalf("expected single x-stelae server entry, got %v", meta["servers"])
+		}
+		if servers[0] != "fs" {
+			t.Fatalf("expected x-stelae servers to include fs, got %v", meta["servers"])
+		}
+		if primary, _ := meta["primaryServer"].(string); primary != "fs" {
+			t.Fatalf("expected primaryServer fs, got %v", meta["primaryServer"])
+		}
 		found = true
 	}
 	if !found {
@@ -311,6 +356,12 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 		}
 		if name, ok := manifestTool["name"].(string); !ok || name != "fs_read_file" {
 			t.Fatalf("expected manifest alias applied, got %v", manifestTool["name"])
+		}
+		if schema, ok := manifestTool["inputSchema"].(map[string]any); !ok || schema["type"] != "object" {
+			t.Fatalf("expected manifest inputSchema override, got %v", manifestTool["inputSchema"])
+		}
+		if schema, ok := manifestTool["outputSchema"].(map[string]any); !ok || schema["type"] != "object" {
+			t.Fatalf("expected manifest outputSchema override, got %v", manifestTool["outputSchema"])
 		}
 		found = true
 	}

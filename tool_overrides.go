@@ -9,14 +9,16 @@ import (
 )
 
 type toolOverrideFile struct {
-	Tools   map[string]*ToolOverrideConfig   `json:"tools,omitempty"`
-	Master  *toolOverrideFragment            `json:"master,omitempty"`
-	Servers map[string]*toolOverrideFragment `json:"servers,omitempty"`
+	SchemaVersion int                              `json:"schemaVersion,omitempty"`
+	Tools         map[string]*ToolOverrideConfig   `json:"tools,omitempty"`
+	Master        *toolOverrideFragment            `json:"master,omitempty"`
+	Servers       map[string]*toolOverrideFragment `json:"servers,omitempty"`
 }
 
 type toolOverrideFragment struct {
-	Enabled *bool                          `json:"enabled,omitempty"`
-	Tools   map[string]*ToolOverrideConfig `json:"tools,omitempty"`
+	Enabled  *bool                          `json:"enabled,omitempty"`
+	Metadata map[string]any                 `json:"metadata,omitempty"`
+	Tools    map[string]*ToolOverrideConfig `json:"tools,omitempty"`
 }
 
 type ToolOverrideSet struct {
@@ -59,6 +61,9 @@ func loadToolOverridesFromPath(path string) (*ToolOverrideSet, error) {
 		if fragment.Enabled != nil {
 			copyFragment.Enabled = copyBoolPointer(fragment.Enabled)
 		}
+		if len(fragment.Metadata) > 0 {
+			copyFragment.Metadata = copyStringAnyMap(fragment.Metadata)
+		}
 		if len(fragment.Tools) > 0 {
 			copyFragment.Tools = make(map[string]*ToolOverrideConfig, len(fragment.Tools))
 			for toolName, cfg := range fragment.Tools {
@@ -73,9 +78,16 @@ func loadToolOverridesFromPath(path string) (*ToolOverrideSet, error) {
 		if raw.Master.Enabled != nil {
 			set.Master.Enabled = copyBoolPointer(raw.Master.Enabled)
 		}
+		if len(raw.Master.Metadata) > 0 {
+			set.Master.Metadata = copyStringAnyMap(raw.Master.Metadata)
+		}
 		if len(raw.Master.Tools) > 0 {
 			set.Master.Tools = make(map[string]*ToolOverrideConfig, len(raw.Master.Tools))
 			for toolName, cfg := range raw.Master.Tools {
+				if toolName != "*" {
+					set.addWarning(fmt.Sprintf("tool_overrides: removing master tool-specific override %q; use servers.<name>.tools", toolName))
+					continue
+				}
 				set.Master.Tools[toolName] = copyToolOverrideConfig(cfg)
 			}
 			mergeToolOverrideInto(set.ToolOverrides, raw.Master.Tools)
@@ -156,6 +168,12 @@ func copyToolOverrideConfig(in *ToolOverrideConfig) *ToolOverrideConfig {
 	if in.Enabled != nil {
 		out.Enabled = copyBoolPointer(in.Enabled)
 	}
+	if in.InputSchema != nil {
+		out.InputSchema = copySchemaMap(in.InputSchema)
+	}
+	if in.OutputSchema != nil {
+		out.OutputSchema = copySchemaMap(in.OutputSchema)
+	}
 	return out
 }
 
@@ -196,6 +214,12 @@ func mergeOverrideConfig(base, extra *ToolOverrideConfig) *ToolOverrideConfig {
 	if extra.Enabled != nil {
 		result.Enabled = copyBoolPointer(extra.Enabled)
 	}
+	if extra.InputSchema != nil {
+		result.InputSchema = copySchemaMap(extra.InputSchema)
+	}
+	if extra.OutputSchema != nil {
+		result.OutputSchema = copySchemaMap(extra.OutputSchema)
+	}
 	return result
 }
 
@@ -213,6 +237,39 @@ func copyStringPointer(in *string) *string {
 	}
 	v := *in
 	return &v
+}
+
+func copySchemaValue(v any) any {
+	switch typed := v.(type) {
+	case map[string]any:
+		return copySchemaMap(typed)
+	case []any:
+		return copySchemaSlice(typed)
+	default:
+		return typed
+	}
+}
+
+func copySchemaSlice(in []any) []any {
+	if in == nil {
+		return nil
+	}
+	out := make([]any, len(in))
+	for i, v := range in {
+		out[i] = copySchemaValue(v)
+	}
+	return out
+}
+
+func copySchemaMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = copySchemaValue(v)
+	}
+	return out
 }
 
 func fragmentToolEnabled(fragment *toolOverrideFragment, toolName string) *bool {
@@ -405,6 +462,9 @@ func copyFragment(src *toolOverrideFragment) *toolOverrideFragment {
 	if src.Enabled != nil {
 		dst.Enabled = copyBoolPointer(src.Enabled)
 	}
+	if len(src.Metadata) > 0 {
+		dst.Metadata = copyStringAnyMap(src.Metadata)
+	}
 	if len(src.Tools) > 0 {
 		dst.Tools = copyToolOverrideMap(src.Tools)
 	}
@@ -440,6 +500,17 @@ func mergeOverrideSets(base, extra *ToolOverrideSet) *ToolOverrideSet {
 		if fragment.Enabled != nil {
 			dst.Enabled = copyBoolPointer(fragment.Enabled)
 		}
+		if len(fragment.Metadata) > 0 {
+			if dst.Metadata == nil {
+				dst.Metadata = copyStringAnyMap(fragment.Metadata)
+			} else {
+				for k, v := range fragment.Metadata {
+					if _, ok := dst.Metadata[k]; !ok {
+						dst.Metadata[k] = v
+					}
+				}
+			}
+		}
 		if len(fragment.Tools) > 0 {
 			if dst.Tools == nil {
 				dst.Tools = make(map[string]*ToolOverrideConfig)
@@ -453,6 +524,17 @@ func mergeOverrideSets(base, extra *ToolOverrideSet) *ToolOverrideSet {
 		} else {
 			if extra.Master.Enabled != nil {
 				result.Master.Enabled = copyBoolPointer(extra.Master.Enabled)
+			}
+			if len(extra.Master.Metadata) > 0 {
+				if result.Master.Metadata == nil {
+					result.Master.Metadata = copyStringAnyMap(extra.Master.Metadata)
+				} else {
+					for k, v := range extra.Master.Metadata {
+						if _, ok := result.Master.Metadata[k]; !ok {
+							result.Master.Metadata[k] = v
+						}
+					}
+				}
 			}
 			if len(extra.Master.Tools) > 0 {
 				if result.Master.Tools == nil {
