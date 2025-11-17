@@ -52,7 +52,7 @@ func TestBuildInitializeResultIncludesServerInfo(t *testing.T) {
 		},
 	}
 
-	result := buildInitializeResult(cfg, servers, nil)
+	result := buildInitializeResult(cfg, servers, nil, nil)
 
 	serverInfoValue, ok := result["serverInfo"]
 	if !ok {
@@ -269,7 +269,7 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 		Renamed:       make(map[string]string),
 	}
 	sanitizeToolOverrideSet(set)
-	tools := collectTools(servers, set)
+	tools := collectTools(servers, set, nil)
 	if len(tools) == 0 {
 		t.Fatalf("expected tools from collectTools")
 	}
@@ -369,7 +369,7 @@ func TestToolOverridesApplyAnnotations(t *testing.T) {
 		t.Fatalf("read_file tool not found in manifest output")
 	}
 
-	init := buildInitializeResult(config, servers, set)
+	init := buildInitializeResult(config, servers, set, nil)
 	initTools, ok := init["tools"].([]map[string]any)
 	if !ok || len(initTools) == 0 {
 		t.Fatalf("expected tools in initialize result")
@@ -408,7 +408,7 @@ func TestToolsListHTTPHandlerReturnsCatalog(t *testing.T) {
 			tools:     []mcp.Tool{{Name: "fetch"}},
 		},
 	}
-	handler := toolsListHTTPHandler(&ready, servers, nil)
+	handler := toolsListHTTPHandler(&ready, servers, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/tools/list", nil)
 	resp := httptest.NewRecorder()
 	handler(resp, req)
@@ -439,7 +439,7 @@ func TestToolsListHTTPHandlerReturnsCatalog(t *testing.T) {
 }
 
 func TestToolsListHTTPHandlerRejectsNonGET(t *testing.T) {
-	handler := toolsListHTTPHandler(&atomic.Bool{}, map[string]*Server{}, nil)
+	handler := toolsListHTTPHandler(&atomic.Bool{}, map[string]*Server{}, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/tools/list", nil)
 	resp := httptest.NewRecorder()
 	handler(resp, req)
@@ -494,7 +494,7 @@ func TestCollectToolsIncludesFacadeAndServerCatalog(t *testing.T) {
 		},
 	}
 
-	tools := collectTools(servers, nil)
+	tools := collectTools(servers, nil, nil)
 	if len(tools) != 3 {
 		t.Fatalf("expected facade search/fetch plus summarize, got %d", len(tools))
 	}
@@ -528,7 +528,7 @@ func TestCollectToolsIncludesFacadeAndServerCatalog(t *testing.T) {
 }
 
 func TestCollectToolsProvidesFacadeFallbacks(t *testing.T) {
-	tools := collectTools(map[string]*Server{}, nil)
+	tools := collectTools(map[string]*Server{}, nil, nil)
 	if len(tools) != 2 {
 		t.Fatalf("expected facade fallback tools, got %d entries", len(tools))
 	}

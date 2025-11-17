@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -477,7 +478,7 @@ func resolveManifestVersion(config *Config, manifestCfg *ManifestConfig, doc map
 	return ""
 }
 
-func toolsListHTTPHandler(clientsReady *atomic.Bool, servers map[string]*Server, overrides *ToolOverrideSet) http.HandlerFunc {
+func toolsListHTTPHandler(clientsReady *atomic.Bool, servers map[string]*Server, overrides *ToolOverrideSet, intended *catalogFile) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -489,7 +490,7 @@ func toolsListHTTPHandler(clientsReady *atomic.Bool, servers map[string]*Server,
 			w.Header().Set("X-Proxy-Waited-For-Init", "true")
 		}
 
-		items := collectTools(servers, overrides)
+		items := collectTools(servers, overrides, intended)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"tools": items})
 	}
@@ -517,6 +518,24 @@ func waitForClients(clientsReady *atomic.Bool, timeout time.Duration) bool {
 	return waited
 }
 
+func generatedAtValue(snapshot map[string]any) string {
+	if snapshot == nil {
+		return ""
+	}
+	if ts, ok := snapshot["generatedAt"].(string); ok {
+		return ts
+	}
+	return ""
+}
+
+func toolCount(snapshot map[string]any) int {
+	if snapshot == nil {
+		return 0
+	}
+	tools := parseToolSlice(snapshot["tools"])
+	return len(tools)
+}
+
 func handleNotification(w http.ResponseWriter, req *jsonrpcRequest) bool {
 	if req == nil || req.ID != nil {
 		return false
@@ -532,6 +551,27 @@ func startHTTPServer(config *Config) error {
 	if uErr != nil {
 		return uErr
 	}
+
+	stateDir, err := requireHomePath(stateHome(), stateHome())
+	if err != nil {
+		return fmt.Errorf("invalid STELAE_STATE_HOME: %w", err)
+	}
+	useIntendedCatalog := envEnabled("STELAE_USE_INTENDED_CATALOG")
+	emitLiveCatalog := envEnabled("STELAE_EMIT_LIVE_CATALOG")
+	liveHistoryCount := envInt("STELAE_LIVE_HISTORY_COUNT", 5)
+	if liveHistoryCount < 0 {
+		liveHistoryCount = 0
+	}
+	descriptorHistoryCount := envInt("STELAE_DESCRIPTOR_HISTORY_COUNT", 3)
+	if descriptorHistoryCount < 0 {
+		descriptorHistoryCount = 0
+	}
+
+	var (
+		intendedCatalog *catalogFile
+		liveState       liveSnapshotState
+		diagMu          sync.RWMutex
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -564,8 +604,10 @@ func startHTTPServer(config *Config) error {
 		for name, srv := range servers {
 			for _, t := range srv.tools {
 				tmpTools[t.Name] = name
-				if alias, ok := toolOverrides.AliasForTool(t.Name); ok {
-					tmpTools[alias] = name
+				if toolOverrides != nil {
+					if alias, ok := toolOverrides.AliasForTool(t.Name); ok {
+						tmpTools[alias] = name
+					}
 				}
 			}
 			for _, p := range srv.prompts {
@@ -591,6 +633,22 @@ func startHTTPServer(config *Config) error {
 			Description: "",
 		}
 	}
+	if manifestCfg.ToolOverridesPath != "" {
+		if guarded, err := resolveGuardedPath(manifestCfg.ToolOverridesPath); err != nil {
+			log.Printf("<manifest> rejecting toolOverridesPath outside config/state home: %v", err)
+			manifestCfg.ToolOverridesPath = ""
+		} else {
+			manifestCfg.ToolOverridesPath = guarded
+		}
+	}
+	if manifestCfg.ToolSchemaStatusPath != "" {
+		if guarded, err := resolveGuardedPath(manifestCfg.ToolSchemaStatusPath); err != nil {
+			log.Printf("<manifest> rejecting toolSchemaStatusPath outside config/state home: %v", err)
+			manifestCfg.ToolSchemaStatusPath = ""
+		} else {
+			manifestCfg.ToolSchemaStatusPath = guarded
+		}
+	}
 	if len(manifestCfg.ToolOverrides) > 0 {
 		toolOverrides = &ToolOverrideSet{
 			ToolOverrides: copyToolOverrideMap(manifestCfg.ToolOverrides),
@@ -610,6 +668,20 @@ func startHTTPServer(config *Config) error {
 	if toolOverrides != nil {
 		for _, msg := range toolOverrides.Warnings {
 			log.Printf("<manifest> %s", msg)
+		}
+	}
+	if useIntendedCatalog {
+		intendedPath, pathErr := requireHomePath(stateDir, filepath.Join(stateDir, "intended_catalog.json"))
+		if pathErr != nil {
+			log.Printf("<catalog> STELAE_USE_INTENDED_CATALOG=1 rejected intended catalog path: %v", pathErr)
+		} else if loaded, loadErr := loadCatalogFile(intendedPath); loadErr != nil {
+			log.Printf("<catalog> STELAE_USE_INTENDED_CATALOG=1 but failed to load %s: %v", intendedPath, loadErr)
+		} else {
+			intendedCatalog = loaded
+			log.Printf("<catalog> using intended catalog %s (tools=%d)", intendedPath, len(loaded.ToolsByName))
+		}
+		if intendedCatalog == nil {
+			log.Printf("<catalog> STELAE_USE_INTENDED_CATALOG=1 but intended catalog unavailable, using runtime overrides")
 		}
 	}
 
@@ -645,13 +717,66 @@ func startHTTPServer(config *Config) error {
 	if !strings.HasPrefix(toolsPath, "/") {
 		toolsPath = "/" + toolsPath
 	}
-	httpMux.HandleFunc(toolsPath, toolsListHTTPHandler(&clientsReady, servers, toolOverrides))
+	httpMux.HandleFunc(toolsPath, toolsListHTTPHandler(&clientsReady, servers, toolOverrides, intendedCatalog))
 
 	streamPath := path.Join(baseURL.Path, "stream")
 	if !strings.HasPrefix(streamPath, "/") {
 		streamPath = "/" + streamPath
 	}
 	httpMux.HandleFunc(streamPath, streamAliasHandler(httpMux, mcpPath))
+	if emitLiveCatalog {
+		diagPath := path.Join(baseURL.Path, "mcp", "diagnostics", "catalog")
+		if !strings.HasPrefix(diagPath, "/") {
+			diagPath = "/" + diagPath
+		}
+		httpMux.HandleFunc(diagPath, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", http.MethodGet)
+				http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			diagMu.RLock()
+			resp := map[string]any{
+				"stateHome":              stateDir,
+				"liveHistoryCount":       liveHistoryCount,
+				"descriptorHistoryCount": descriptorHistoryCount,
+				"emitLiveCatalog":        emitLiveCatalog,
+				"useIntendedCatalog":     useIntendedCatalog,
+			}
+			if intendedCatalog != nil {
+				entry := map[string]any{
+					"path":      intendedCatalog.Path,
+					"toolCount": len(intendedCatalog.ToolsByName),
+				}
+				if !intendedCatalog.GeneratedAt.IsZero() {
+					entry["generatedAt"] = intendedCatalog.GeneratedAt.Format(time.RFC3339Nano)
+				}
+				resp["intendedCatalog"] = entry
+			}
+			if liveState.liveCatalog != nil {
+				resp["liveCatalog"] = map[string]any{
+					"path":        liveState.liveCatalogPath,
+					"generatedAt": generatedAtValue(liveState.liveCatalog),
+					"toolCount":   toolCount(liveState.liveCatalog),
+				}
+			}
+			if liveState.liveDescriptors != nil {
+				resp["liveDescriptors"] = map[string]any{
+					"path":        liveState.liveDescriptorsPath,
+					"generatedAt": generatedAtValue(liveState.liveDescriptors),
+					"toolCount":   toolCount(liveState.liveDescriptors),
+				}
+			}
+			status := http.StatusOK
+			if liveState.liveCatalog == nil && liveState.liveDescriptors == nil {
+				status = http.StatusAccepted
+			}
+			diagMu.RUnlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(resp)
+		})
+	}
 
 	// ---- build servers and mount per-server handlers ----
 	info := mcp.Implementation{Name: config.McpProxy.Name}
@@ -699,8 +824,10 @@ func startHTTPServer(config *Config) error {
 			indexMu.Lock()
 			for _, t := range serverCopy.tools {
 				toolIndex[t.Name] = nameCopy
-				if alias, ok := toolOverrides.AliasForTool(t.Name); ok {
-					toolIndex[alias] = nameCopy
+				if toolOverrides != nil {
+					if alias, ok := toolOverrides.AliasForTool(t.Name); ok {
+						toolIndex[alias] = nameCopy
+					}
 				}
 			}
 			for _, p := range serverCopy.prompts {
@@ -728,6 +855,31 @@ func startHTTPServer(config *Config) error {
 		}
 		readyState.Store(snapshot)
 		log.Printf("<facade> Ready: downstream servers=%d readyAt=%s", snapshot.ServerCount, snapshot.ReadyAt.Format(time.RFC3339Nano))
+
+		if emitLiveCatalog {
+			now := time.Now().UTC()
+			liveCatalogSnapshot := buildLiveCatalogSnapshot(config, servers, toolOverrides, intendedCatalog, now)
+			if path, err := writeSnapshotWithHistory(stateDir, filepath.Join(stateDir, "live_catalog.json"), liveCatalogSnapshot, liveHistoryCount, now); err != nil {
+				log.Printf("<catalog> failed to write live catalog snapshot: %v", err)
+			} else {
+				diagMu.Lock()
+				liveState.liveCatalog = liveCatalogSnapshot
+				liveState.liveCatalogPath = path
+				diagMu.Unlock()
+				log.Printf("<catalog> wrote live catalog snapshot to %s", path)
+			}
+
+			descriptorSnapshot := buildLiveDescriptorSnapshot(servers, now)
+			if path, err := writeSnapshotWithHistory(stateDir, filepath.Join(stateDir, "live_descriptors.json"), descriptorSnapshot, descriptorHistoryCount, now); err != nil {
+				log.Printf("<catalog> failed to write live descriptors snapshot: %v", err)
+			} else {
+				diagMu.Lock()
+				liveState.liveDescriptors = descriptorSnapshot
+				liveState.liveDescriptorsPath = path
+				diagMu.Unlock()
+				log.Printf("<catalog> wrote live descriptors snapshot to %s", path)
+			}
+		}
 	}()
 
 	// helper: try multiple internal POST targets for a server and return the first 2xx
@@ -743,11 +895,11 @@ func startHTTPServer(config *Config) error {
 			path.Join(base, "rpc"),
 			path.Join(base, "jsonrpc"),
 		}
-        for _, p := range paths {
-            ctxTimeout, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-            defer cancel()
-            r2 := r.Clone(ctxTimeout)
-            r2.Method = http.MethodPost
+		for _, p := range paths {
+			ctxTimeout, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			defer cancel()
+			r2 := r.Clone(ctxTimeout)
+			r2.Method = http.MethodPost
 			r2.URL = &url.URL{Path: p}
 			r2.RequestURI = ""
 			r2.Body = io.NopCloser(bytes.NewReader(body))
@@ -843,7 +995,7 @@ func startHTTPServer(config *Config) error {
 					w.Header().Set("X-Proxy-Waited-For-Init", "true")
 				}
 
-				result := buildInitializeResult(config, servers, toolOverrides)
+				result := buildInitializeResult(config, servers, toolOverrides, intendedCatalog)
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(rpcOK(req.ID, result))
 				return
@@ -860,7 +1012,7 @@ func startHTTPServer(config *Config) error {
 					w.Header().Set("X-Proxy-Waited-For-Init", "true")
 				}
 
-				items := collectTools(servers, toolOverrides)
+				items := collectTools(servers, toolOverrides, intendedCatalog)
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(rpcOK(req.ID, map[string]any{"tools": items}))
 				return
@@ -908,8 +1060,8 @@ func startHTTPServer(config *Config) error {
 					log.Printf("<facade> prompts/get unknown prompt=%s", p.Name)
 					return
 				}
-            rr := newResponseRecorder()
-            chosen, status := tryDispatch(serverName, body, r, rr)
+				rr := newResponseRecorder()
+				chosen, status := tryDispatch(serverName, body, r, rr)
 				w.Header().Set("X-Proxy-Dispatched-Server", serverName)
 				w.Header().Set("X-Proxy-Internal-Path", chosen)
 				w.Header().Set("X-Proxy-Internal-Status", http.StatusText(status))
@@ -1115,29 +1267,29 @@ func startHTTPServer(config *Config) error {
 				w.Header().Set("X-Proxy-Internal-Path", chosen)
 				w.Header().Set("X-Proxy-Internal-Status", http.StatusText(status))
 
-            if status >= 200 && status <= 204 {
-                // Adapt call result if needed
-                var payload map[string]any
-                if err := json.Unmarshal(rr.Body.Bytes(), &payload); err == nil {
-                    if _, ok := payload["result"].(map[string]any); ok {
-                        if modified, used, schema, err := adaptCallResult(serverName, incomingName, toolOverrides, manifestCfg, payload); err == nil {
-                            if modified {
-                                // persist overrides when schema chosen differs
-                                _ = writeServerToolOutputSchema(manifestCfg.ToolOverridesPath, serverName, incomingName, schema)
-                            }
-                            // write adapted response
-                            w.Header().Set("Content-Type", "application/json")
-                            _ = json.NewEncoder(w).Encode(payload)
-                            log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d adapter=%s", incomingName, serverName, chosen, status, used)
-                            return
-                        }
-                    }
-                }
-                // Fallback: flush upstream as-is
-                rr.FlushTo(w)
-                log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d", incomingName, serverName, chosen, status)
-                return
-            }
+				if status >= 200 && status <= 204 {
+					// Adapt call result if needed
+					var payload map[string]any
+					if err := json.Unmarshal(rr.Body.Bytes(), &payload); err == nil {
+						if _, ok := payload["result"].(map[string]any); ok {
+							if modified, used, schema, err := adaptCallResult(serverName, incomingName, toolOverrides, manifestCfg, payload); err == nil {
+								if modified {
+									// persist overrides when schema chosen differs
+									_ = writeServerToolOutputSchema(manifestCfg.ToolOverridesPath, serverName, incomingName, schema)
+								}
+								// write adapted response
+								w.Header().Set("Content-Type", "application/json")
+								_ = json.NewEncoder(w).Encode(payload)
+								log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d adapter=%s", incomingName, serverName, chosen, status, used)
+								return
+							}
+						}
+					}
+					// Fallback: flush upstream as-is
+					rr.FlushTo(w)
+					log.Printf("<facade> tools/call tool=%s server=%s path=%s status=%d", incomingName, serverName, chosen, status)
+					return
+				}
 
 				// none succeeded: protocol-level error rather than transport 404
 				w.Header().Set("Content-Type", "application/json")

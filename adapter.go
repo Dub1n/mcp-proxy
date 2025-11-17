@@ -25,7 +25,11 @@ func loadStatus(path string) (statusMap, error) {
 	if path == "" {
 		return make(statusMap), nil
 	}
-	data, err := os.ReadFile(path)
+	guarded, guardErr := resolveGuardedPath(path)
+	if guardErr != nil {
+		return make(statusMap), guardErr
+	}
+	data, err := os.ReadFile(guarded)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return make(statusMap), nil
@@ -47,16 +51,23 @@ func writeStatus(path string, st statusMap) error {
 	if path == "" {
 		return nil
 	}
-	tmp := path + ".tmp"
+	guarded, err := resolveGuardedPath(path)
+	if err != nil {
+		return err
+	}
+	tmp := guarded + ".tmp"
 	data, _ := json.MarshalIndent(st, "", "  ")
 	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return os.Rename(tmp, guarded)
 }
 
 func setStatus(path, server, tool, adapter string, consecutive int) {
-	st, _ := loadStatus(path)
+	st, err := loadStatus(path)
+	if err != nil {
+		log.Printf("<adapter> schema status load error for %s: %v", path, err)
+	}
 	if _, ok := st[server]; !ok {
 		st[server] = make(map[string]*toolStatusEntry)
 	}
@@ -65,17 +76,38 @@ func setStatus(path, server, tool, adapter string, consecutive int) {
 		ConsecutiveGeneric: consecutive,
 		UpdatedAt:          time.Now().Unix(),
 	}
-	_ = writeStatus(path, st)
+	if err := writeStatus(path, st); err != nil {
+		log.Printf("<adapter> schema status write error for %s: %v", path, err)
+	}
 }
 
-func getConsecutiveGeneric(path, server, tool string) int {
+func readStatusEntry(path, server, tool string) *toolStatusEntry {
 	st, _ := loadStatus(path)
 	if srv, ok := st[server]; ok {
 		if e, ok := srv[tool]; ok && e != nil {
-			return e.ConsecutiveGeneric
+			copy := *e
+			return &copy
 		}
 	}
-	return 0
+	return nil
+}
+
+func logAdoptionTelemetry(server, tool, adapter string, prev *toolStatusEntry, streak int, schema map[string]any) {
+	state := "succeeded"
+	if adapter == "generic" {
+		if prev == nil || prev.LastAdapter != adapter {
+			state = "started"
+		} else {
+			state = "failed"
+		}
+	} else if prev == nil || prev.LastAdapter != adapter {
+		state = "started"
+	}
+	hash := ""
+	if len(schema) > 0 {
+		hash = hashSchema(schema)
+	}
+	log.Printf("<adoption> state=%s server=%s tool=%s adapter=%s streak=%d schema=%s", state, server, tool, adapter, streak, hash)
 }
 
 // ---- Override Writer ----
@@ -91,7 +123,11 @@ func writeServerToolOutputSchema(path, server, tool string, schema map[string]an
 	if path == "" {
 		return nil
 	}
-	abs, err := filepath.Abs(path)
+	safePath, err := resolveGuardedPath(path)
+	if err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(safePath)
 	if err != nil {
 		return err
 	}
@@ -134,13 +170,19 @@ func boolPtr(b bool) *bool { return &b }
 
 // Returns (modified, adapterUsed, outputSchema, error)
 func adaptCallResult(serverName, toolName string, overrides *ToolOverrideSet, manifest *ManifestConfig, payload map[string]any) (bool, string, map[string]any, error) {
+	statusPath := ""
+	if manifest != nil {
+		statusPath = manifest.ToolSchemaStatusPath
+	}
+	prevStatus := readStatusEntry(statusPath, serverName, toolName)
 	res, _ := payload["result"].(map[string]any)
 	if res == nil {
 		return false, "pass_through", nil, nil
 	}
 	if sc, ok := res["structuredContent"].(map[string]any); ok && sc != nil {
 		// already structured
-		setStatus(manifest.ToolSchemaStatusPath, serverName, toolName, "pass_through", 0)
+		setStatus(statusPath, serverName, toolName, "pass_through", 0)
+		logAdoptionTelemetry(serverName, toolName, "pass_through", prevStatus, 1, sc)
 		return false, "pass_through", sc, nil
 	}
 
@@ -152,13 +194,15 @@ func adaptCallResult(serverName, toolName string, overrides *ToolOverrideSet, ma
 	if len(decl) > 0 {
 		if field, ok := singleStringField(decl); ok {
 			res["structuredContent"] = map[string]any{field: text}
-			setStatus(manifest.ToolSchemaStatusPath, serverName, toolName, "declared", 0)
+			setStatus(statusPath, serverName, toolName, "declared", 0)
+			logAdoptionTelemetry(serverName, toolName, "declared", prevStatus, 1, decl)
 			return true, "declared", decl, nil
 		}
 		if isMetadataContentSchema(decl) {
 			mc := parseMetadataContent(text)
 			res["structuredContent"] = mc
-			setStatus(manifest.ToolSchemaStatusPath, serverName, toolName, "declared", 0)
+			setStatus(statusPath, serverName, toolName, "declared", 0)
+			logAdoptionTelemetry(serverName, toolName, "declared", prevStatus, 1, decl)
 			return true, "declared", decl, nil
 		}
 	}
@@ -172,8 +216,12 @@ func adaptCallResult(serverName, toolName string, overrides *ToolOverrideSet, ma
 		"required": []any{"result"},
 	}
 	res["structuredContent"] = map[string]any{"result": text}
-	count := getConsecutiveGeneric(manifest.ToolSchemaStatusPath, serverName, toolName) + 1
-	setStatus(manifest.ToolSchemaStatusPath, serverName, toolName, "generic", count)
+	count := 1
+	if prevStatus != nil && prevStatus.LastAdapter == "generic" {
+		count = prevStatus.ConsecutiveGeneric + 1
+	}
+	setStatus(statusPath, serverName, toolName, "generic", count)
+	logAdoptionTelemetry(serverName, toolName, "generic", prevStatus, count, gen)
 	// persist generic immediately if no declared; else after threshold (2)
 	if len(decl) == 0 || count >= 2 {
 		_ = writeServerToolOutputSchema(manifest.ToolOverridesPath, serverName, toolName, gen)

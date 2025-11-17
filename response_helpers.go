@@ -34,7 +34,7 @@ func (a *aggregatedTool) serverList() []string {
 	return list
 }
 
-func collectTools(servers map[string]*Server, overrides *ToolOverrideSet) []map[string]any {
+func collectTools(servers map[string]*Server, overrides *ToolOverrideSet, intended *catalogFile) []map[string]any {
 	seen := make(map[string]*aggregatedTool)
 	for serverName, srv := range servers {
 		if !serverEnabled(overrides, serverName) {
@@ -45,6 +45,11 @@ func collectTools(servers map[string]*Server, overrides *ToolOverrideSet) []map[
 				continue
 			}
 			descriptor := toolDescriptorFromServer(tool)
+			if intended != nil {
+				if intendedTool := intended.ToolsByName[tool.Name]; intendedTool != nil {
+					descriptor = mergeToolDescriptors(copyStringAnyMap(intendedTool), descriptor)
+				}
+			}
 			if tool.Name == facadeSearchToolName {
 				descriptor = ensureSearchDescriptor(descriptor)
 			} else if tool.Name == facadeFetchToolName {
@@ -348,8 +353,8 @@ func collectResourceTemplates(servers map[string]*Server) []map[string]any {
 	return templates
 }
 
-func buildInitializeResult(config *Config, servers map[string]*Server, overrides *ToolOverrideSet) map[string]any {
-	tools := collectTools(servers, overrides)
+func buildInitializeResult(config *Config, servers map[string]*Server, overrides *ToolOverrideSet, intended *catalogFile) map[string]any {
+	tools := collectTools(servers, overrides, intended)
 	prompts := collectPrompts(servers)
 	resources := collectResources(servers)
 	resourceTemplates := collectResourceTemplates(servers)
